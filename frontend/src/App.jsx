@@ -184,6 +184,7 @@ export default function App() {
   ]);
   const [inputText, setInputText] = useState('');
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(null);
   const [isThinking, setIsThinking] = useState(false);
   const [parsingStatus, setParsingStatus] = useState('IDLE'); // 'IDLE', 'ACTIVE', 'COMPLETED'
   const [embeddingStatus, setEmbeddingStatus] = useState('IDLE'); // 'IDLE', 'ACTIVE', 'COMPLETED'
@@ -201,6 +202,7 @@ export default function App() {
   const [showRightPanel, setShowRightPanel] = useState(true);
   const [activeRightTab, setActiveRightTab] = useState('preview');
   const [pinnedMessages, setPinnedMessages] = useState([]);
+  const [copiedMessageId, setCopiedMessageId] = useState(null);
   const [activeTab, setActiveTab] = useState('chat'); // 'chat', 'summary', 'pinned'
   const [currentModel, setCurrentModel] = useState('NEURAL_CORE_V3');
   const [showLeftPanel, setShowLeftPanel] = useState(true);
@@ -238,6 +240,7 @@ export default function App() {
     voiceInput: true
   });
   const [isConfirmingLogout, setIsConfirmingLogout] = useState(false);
+  const [chatPendingDelete, setChatPendingDelete] = useState(null);
 
   const scrollRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -246,6 +249,15 @@ export default function App() {
   const libraryRef = useRef(null);
   const chatSectionRef = useRef(null);
   const recognitionRef = useRef(null);
+
+  const getAuthHeaders = () => (
+    userToken ? { Authorization: `Bearer ${userToken}` } : {}
+  );
+
+  const getJsonHeaders = () => ({
+    'Content-Type': 'application/json',
+    ...getAuthHeaders()
+  });
 
   // Initialize Gemini
   const ai = new GoogleGenAI({
@@ -263,7 +275,12 @@ export default function App() {
   useEffect(() => {
     const urlParams = new URLSearchParams(window.location.search);
     const chatId = urlParams.get('chat');
-    if (chatId) {
+    const shareToken = urlParams.get('share');
+    
+    if (shareToken) {
+      // Load chat from share token (not from DB)
+      loadSharedChatByToken(shareToken);
+    } else if (chatId) {
       if (userToken) {
         loadChat(chatId);
       } else {
@@ -271,6 +288,28 @@ export default function App() {
       }
     }
   }, [userToken]);
+
+  const loadSharedChatByToken = async (token) => {
+    setIsLoadingHistory(true);
+    try {
+      const res = await fetch(`/api/shared/${token}`);
+      const data = await res.json();
+      if (res.ok) {
+        setMessages(data.messages || []);
+        setDocuments(data.documents || []);
+        setCurrentChatId(token);
+        setIsCurrentChatPublic(true);
+        setError('VIEWING_SHARED: Accessing public neural session (not stored in database).');
+        setTimeout(() => setError(null), 5000);
+      } else {
+        setError(`SHARE_ACCESS_FAILED: ${data.error}`);
+      }
+    } catch (err) {
+      setError('NEURAL_LINK_BROKEN: Failed to fetch shared logs.');
+    } finally {
+      setIsLoadingHistory(false);
+    }
+  };
 
   const loadSharedChat = async (chatId) => {
     setIsLoadingHistory(true);
@@ -494,7 +533,7 @@ export default function App() {
     try {
       const res = await fetch('/api/pins', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getJsonHeaders(),
         body: JSON.stringify({
           chatId: currentChatId,
           messageId: msg.id,
@@ -510,10 +549,31 @@ export default function App() {
 
   const handleUnpin = async (pinId) => {
     try {
-      await fetch(`/api/pins/${pinId}`, { method: 'DELETE' });
+      await fetch(`/api/pins/${pinId}`, {
+        method: 'DELETE',
+        headers: getAuthHeaders()
+      });
       fetchPins();
     } catch (err) {
       console.error('Error unpinning message:', err);
+    }
+  };
+
+  const getPinnedForMessage = (messageId) => (
+    pinnedMessages.find(pin => pin.chatId === currentChatId && pin.messageId === messageId)
+  );
+
+  const copyMessageContent = async (msg) => {
+    try {
+      await navigator.clipboard.writeText(msg.content);
+      setCopiedMessageId(msg.id);
+      setError('COPIED: Message copied.');
+      setTimeout(() => {
+        setCopiedMessageId(null);
+        setError(null);
+      }, 2000);
+    } catch (err) {
+      setError('COPY_FAILED: Clipboard access denied.');
     }
   };
 
@@ -535,7 +595,9 @@ export default function App() {
     setIsLoadingHistory(true);
     setCurrentChatId(chatId);
     try {
-      const res = await fetch(`/api/chats/${chatId}`);
+      const res = await fetch(`/api/chats/${chatId}`, {
+        headers: getAuthHeaders()
+      });
       const data = await res.json();
       if (data && data.messages) {
         setIsCurrentChatPublic(data.isPublic || false);
@@ -544,7 +606,37 @@ export default function App() {
           ...m,
           id: m._id || idx.toString()
         }));
+        const restoredDocuments = (data.documents || []).map((doc, idx) => ({
+          ...doc,
+          id: doc.id || doc._id || `${chatId}-doc-${idx}`
+        }));
         setMessages(formattedMessages);
+        setDocuments(restoredDocuments);
+        setProcessedChunks([]);
+
+        const docsWithContent = restoredDocuments.filter(doc => doc.content || doc.chunks?.length);
+        if (docsWithContent.length > 0) {
+          setEmbeddingStatus('ACTIVE');
+          const restoredChunks = [];
+          for (const doc of docsWithContent) {
+            const chunks = doc.chunks?.length ? doc.chunks : chunkText(doc.content || '');
+            for (const chunk of chunks) {
+              if (!chunk.trim()) continue;
+              const result = await ai.models.embedContent({
+                model: 'gemini-embedding-2-preview',
+                contents: [{ parts: [{ text: chunk }] }]
+              });
+              restoredChunks.push({
+                text: chunk,
+                embedding: result.embeddings[0].values,
+                docId: doc.id,
+                docName: doc.name
+              });
+            }
+          }
+          setProcessedChunks(restoredChunks);
+          setEmbeddingStatus('COMPLETED');
+        }
       }
     } catch (err) {
       console.error('Error loading chat:', err);
@@ -554,17 +646,27 @@ export default function App() {
     }
   };
 
-  const deleteChat = async (e, chatId) => {
+  const requestDeleteChat = (e, chat) => {
     e.stopPropagation();
-    if (!window.confirm('Delete this chat?')) return;
+    setChatPendingDelete(chat);
+  };
+
+  const confirmDeleteChat = async () => {
+    if (!chatPendingDelete) return;
+    const chatId = chatPendingDelete._id;
     try {
-      await fetch(`/api/chats/${chatId}`, { method: 'DELETE' });
+      await fetch(`/api/chats/${chatId}`, {
+        method: 'DELETE',
+        headers: getAuthHeaders()
+      });
       setChats(prev => prev.filter(c => c._id !== chatId));
       if (currentChatId === chatId) {
         startNewChatSession();
       }
+      setChatPendingDelete(null);
     } catch (err) {
       console.error('Error deleting chat:', err);
+      setError(`DELETE_FAILED: ${err.message || 'Could not delete chat.'}`);
     }
   };
 
@@ -605,12 +707,201 @@ export default function App() {
     setProcessedChunks([]);
     setParsingStatus('IDLE');
     setEmbeddingStatus('IDLE');
+    setUploadProgress(null);
     setInputText('');
     setIntegrityEnabled(true);
     setError(null);
     setIsThinking(false);
     setIsResetting(false);
   };
+
+  const ensurePersistedChat = async (title = 'INITIATED_LOG') => {
+    if (!userToken) return null;
+    if (currentChatId) return currentChatId;
+
+    const chatRes = await fetch('/api/chats', {
+      method: 'POST',
+      headers: getJsonHeaders(),
+      body: JSON.stringify({ title, messages: [], documents: [] })
+    });
+    const chatData = await chatRes.json();
+    if (!chatRes.ok) {
+      throw new Error(chatData.error || 'Failed to create chat session');
+    }
+
+    setCurrentChatId(chatData._id);
+    fetchChats();
+    return chatData._id;
+  };
+
+  const persistDocumentContent = async (chatId, doc, content, chunks) => {
+    const docRes = await fetch(`/api/chats/${chatId}/documents`, {
+      method: 'POST',
+      headers: getJsonHeaders(),
+      body: JSON.stringify({
+        name: doc.name,
+        pageCount: doc.pageCount,
+        content,
+        chunks: []
+      })
+    });
+    const docData = await docRes.json().catch(() => ({}));
+    if (!docRes.ok) {
+      throw new Error(docData.error || `Document save failed with HTTP ${docRes.status}`);
+    }
+    return docData;
+  };
+
+  const saveChatMessage = async (chatId, message) => {
+    if (!userToken || !chatId) return null;
+
+    const res = await fetch(`/api/chats/${chatId}/messages`, {
+      method: 'POST',
+      headers: getJsonHeaders(),
+      body: JSON.stringify(message)
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || `Message save failed with HTTP ${res.status}`);
+    }
+    return data;
+  };
+
+  const readGeminiText = (response) => {
+    if (!response) return '';
+    if (typeof response.text === 'string') return response.text;
+    return response.candidates?.[0]?.content?.parts
+      ?.map(part => part.text || '')
+      .join('') || '';
+  };
+
+  const getFriendlyAiError = (err) => {
+    const raw = typeof err?.message === 'string' ? err.message : String(err || '');
+    if (/RESOURCE_EXHAUSTED|quota|429/i.test(raw)) {
+      return 'AI quota is exhausted for the current API key. The PDF upload succeeded, but Gemini cannot generate a new answer right now.';
+    }
+    if (/API key|permission|403|401/i.test(raw)) {
+      return 'AI request was rejected. Please check the Gemini API key and permissions.';
+    }
+    if (/network|fetch|Failed to fetch/i.test(raw)) {
+      return 'AI request could not reach Gemini. Please check the network connection.';
+    }
+    return raw.length > 220 ? `${raw.slice(0, 220)}...` : raw;
+  };
+
+  const buildLocalDocumentAnswer = (query, contextText) => {
+    if (!contextText?.trim()) {
+      return 'DATA_NOT_FOUND: The PDF is uploaded, but no searchable document text is available in this session.';
+    }
+
+    const cleanedContext = contextText
+      .replace(/\[DOC:[^\]]+\]\s*CONTENT:\s*/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const preview = cleanedContext.slice(0, 1400);
+
+    return [
+      'AI_QUOTA_LIMIT: Gemini quota is currently exhausted, so I cannot generate a full model answer right now.',
+      '',
+      `LOCAL_DOCUMENT_EXTRACT for "${query}":`,
+      preview || 'No matching extract found in the uploaded document.',
+      '',
+      'Try again after quota resets for a full AI-generated response.'
+    ].join('\n');
+  };
+
+  const buildLocalSummary = (text) => {
+    const cleaned = (text || '').replace(/\s+/g, ' ').trim();
+    if (!cleaned) return 'No readable text was found in this PDF.';
+
+    const sentences = cleaned
+      .split(/(?<=[.!?])\s+/)
+      .map(sentence => sentence.trim())
+      .filter(sentence => sentence.length > 40);
+    const highlights = sentences.slice(0, 6);
+    const keywords = Array.from(new Set(
+      cleaned
+        .toLowerCase()
+        .match(/\b[a-z][a-z-]{4,}\b/g) || []
+    )).slice(0, 12);
+
+    return [
+      '## Auto Summary',
+      '',
+      highlights.length > 0
+        ? highlights.map(sentence => `- ${sentence}`).join('\n')
+        : `- ${cleaned.slice(0, 900)}${cleaned.length > 900 ? '...' : ''}`,
+      '',
+      keywords.length > 0 ? `**Key terms:** ${keywords.join(', ')}` : ''
+    ].filter(Boolean).join('\n');
+  };
+
+  const generateAiResponse = async (systemInstruction, query) => {
+    const modelCandidates = [
+      'gemini-3-flash-preview',
+      'gemini-2.5-flash',
+      'gemini-2.0-flash'
+    ];
+    let lastError = null;
+
+    for (const model of modelCandidates) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: query,
+          config: { systemInstruction }
+        });
+        const text = readGeminiText(response);
+        if (text.trim()) return text;
+        lastError = new Error(`${model} returned an empty response`);
+      } catch (err) {
+        lastError = err;
+        console.error(`Gemini generation failed with ${model}:`, err);
+      }
+    }
+
+    const friendlyError = new Error(getFriendlyAiError(lastError || new Error('AI generation failed')));
+    friendlyError.originalError = lastError;
+    throw friendlyError;
+  };
+
+  const extractPdfTextWithProgress = (file) => new Promise((resolve, reject) => {
+    const formData = new FormData();
+    formData.append('pdf', file);
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/extract-text');
+
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) return;
+      const uploadPercent = Math.round((event.loaded / event.total) * 35);
+      setUploadProgress({
+        fileName: file.name,
+        percent: Math.max(1, uploadPercent),
+        label: 'Uploading PDF'
+      });
+    };
+
+    xhr.onload = () => {
+      let data = {};
+      try {
+        data = JSON.parse(xhr.responseText || '{}');
+      } catch (err) {
+        reject(new Error('Server returned an invalid PDF extraction response.'));
+        return;
+      }
+
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new Error(data.error || 'Failed to extract text from PDF.'));
+        return;
+      }
+
+      resolve(data);
+    };
+
+    xhr.onerror = () => reject(new Error('Upload request failed. Check that the backend is running.'));
+    xhr.send(formData);
+  });
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -700,36 +991,13 @@ export default function App() {
     setIsUploading(true);
     setParsingStatus('ACTIVE');
     setEmbeddingStatus('IDLE');
+    setUploadProgress({ fileName: file.name, percent: 1, label: 'Preparing upload' });
     setError(null);
-
-    const formData = new FormData();
-    formData.append('pdf', file);
 
     try {
       // 1. Extract text via backend
-      const response = await fetch('/api/extract-text', {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!response.ok) {
-        let errMsg = 'Failed to extract text from PDF';
-        try {
-          const errData = await response.json();
-          errMsg = errData.error || errMsg;
-        } catch (e) {
-          // Response was not JSON
-        }
-        throw new Error(errMsg);
-      }
-      
-      let data;
-      try {
-        data = await response.json();
-      } catch (e) {
-        console.error('Invalid JSON response from server');
-        throw new Error('Server returned an invalid response format (HTML instead of JSON). The API route might be missing.');
-      }
+      const data = await extractPdfTextWithProgress(file);
+      setUploadProgress({ fileName: file.name, percent: 40, label: 'Extracting text' });
       const fullText = data.text;
       setParsingStatus('COMPLETED');
 
@@ -744,26 +1012,56 @@ export default function App() {
       // 3. Chunk and Embed (Frontend Logic)
       setEmbeddingStatus('ACTIVE');
       const chunks = chunkText(fullText);
+      let persistedChatId = null;
+
+      if (userToken) {
+        setUploadProgress({ fileName: file.name, percent: 50, label: 'Saving document' });
+        persistedChatId = await ensurePersistedChat(file.name.substring(0, 30).toUpperCase());
+        await persistDocumentContent(persistedChatId, newDoc, fullText, chunks);
+        setUploadProgress({ fileName: file.name, percent: 60, label: 'Document saved' });
+        fetchChats();
+        fetchUserData();
+      }
+
       const chunksWithEmbeddings = [];
 
       // Embed chunks
-      for (const chunk of chunks) {
-        if (chunk.trim().length === 0) continue;
-        const result = await ai.models.embedContent({
-          model: 'gemini-embedding-2-preview',
-          contents: [{ parts: [{ text: chunk }] }]
-        });
-        
-        chunksWithEmbeddings.push({
-          text: chunk,
-          embedding: result.embeddings[0].values,
-          docId: newDoc.id,
-          docName: newDoc.name
-        });
+      const usableChunks = chunks.filter(chunk => chunk.trim().length > 0);
+      try {
+        for (let i = 0; i < usableChunks.length; i++) {
+          const chunk = usableChunks[i];
+          const result = await ai.models.embedContent({
+            model: 'gemini-embedding-2-preview',
+            contents: [{ parts: [{ text: chunk }] }]
+          });
+          
+          chunksWithEmbeddings.push({
+            text: chunk,
+            embedding: result.embeddings[0].values,
+            docId: newDoc.id,
+            docName: newDoc.name
+          });
+
+          const embeddingPercent = usableChunks.length
+            ? Math.round(((i + 1) / usableChunks.length) * 30)
+            : 30;
+          setUploadProgress({
+            fileName: file.name,
+            percent: Math.min(90, 60 + embeddingPercent),
+            label: 'Indexing document'
+          });
+        }
+        setEmbeddingStatus('COMPLETED');
+      } catch (embedErr) {
+        console.error('Embedding failed after document save:', embedErr);
+        setEmbeddingStatus('IDLE');
+        setError('DOCUMENT_SAVED: PDF content saved. AI indexing failed, so re-upload may be needed for document chat.');
+        setTimeout(() => setError(null), 5000);
       }
 
-      setProcessedChunks(prev => [...prev, ...chunksWithEmbeddings]);
-      setEmbeddingStatus('COMPLETED');
+      if (chunksWithEmbeddings.length > 0) {
+        setProcessedChunks(prev => [...prev, ...chunksWithEmbeddings]);
+      }
       
       // 4. Extract Entities (Async)
       extractEntities(fullText);
@@ -774,15 +1072,31 @@ export default function App() {
       // 6. Detect Contradictions (Async)
       if (documents.length > 0) detectContradictions();
 
-      setMessages(prev => [...prev, { 
+      const systemMessage = { 
         id: Date.now().toString(), 
         role: 'system', 
-        content: `Successfully processed "${file.name}" (${data.numpages} pages). Neural map updated with ${chunksWithEmbeddings.length} nodes.` 
-      }]);
+        content: `Successfully uploaded "${file.name}" (${data.numpages} pages). Document saved with ${chunks.length} text chunks${chunksWithEmbeddings.length > 0 ? ` and indexed with ${chunksWithEmbeddings.length} neural nodes` : ''}.` 
+      };
+
+      if (userToken) {
+        const chatId = persistedChatId || await ensurePersistedChat(file.name.substring(0, 30).toUpperCase());
+        await fetch(`/api/chats/${chatId}/messages`, {
+          method: 'POST',
+          headers: getJsonHeaders(),
+          body: JSON.stringify({ role: 'system', content: systemMessage.content })
+        });
+        fetchChats();
+        fetchUserData();
+      }
+
+      setUploadProgress({ fileName: file.name, percent: 100, label: 'Upload complete' });
+      setMessages(prev => [...prev, systemMessage]);
+      setTimeout(() => setUploadProgress(null), 1500);
 
     } catch (err) {
       console.error(err);
-      setError('Error processing PDF. Please try again.');
+      setUploadProgress(prev => prev ? { ...prev, label: 'Upload failed' } : null);
+      setError(`PDF_UPLOAD_FAILED: ${err.message}`);
     } finally {
       setIsUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -807,43 +1121,55 @@ export default function App() {
       if (!chatId) {
         const chatRes = await fetch('/api/chats', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getJsonHeaders(),
           body: JSON.stringify({
             title: query.substring(0, 30).toUpperCase(),
             messages: [{ role: 'user', content: query }],
             documents: documents.map(d => ({ name: d.name, pageCount: d.pageCount }))
           })
         });
-        const chatData = await chatRes.json();
+        const chatData = await chatRes.json().catch(() => ({}));
+        if (!chatRes.ok) {
+          throw new Error(chatData.error || `Chat create failed with HTTP ${chatRes.status}`);
+        }
         chatId = chatData._id;
         setCurrentChatId(chatId);
         fetchChats();
       } else {
-        await fetch(`/api/chats/${chatId}/messages`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ role: 'user', content: query })
-        });
+        await saveChatMessage(chatId, { role: 'user', content: query });
       }
 
       // 2. RAG: Retrieve context
       let contextText = '';
       if (processedChunks.length > 0) {
-        const queryEmbedResult = await ai.models.embedContent({
-          model: 'gemini-embedding-2-preview',
-          contents: [{ parts: [{ text: query }] }]
-        });
-        const queryVector = queryEmbedResult.embeddings[0].values;
-        
-        const rankedChunks = [...processedChunks]
-          .map(chunk => ({
-            ...chunk,
-            similarity: cosineSimilarity(queryVector, chunk.embedding)
-          }))
-          .sort((a, b) => b.similarity - a.similarity);
+        try {
+          const queryEmbedResult = await ai.models.embedContent({
+            model: 'gemini-embedding-2-preview',
+            contents: [{ parts: [{ text: query }] }]
+          });
+          const queryVector = queryEmbedResult.embeddings[0].values;
+          
+          const rankedChunks = [...processedChunks]
+            .map(chunk => ({
+              ...chunk,
+              similarity: cosineSimilarity(queryVector, chunk.embedding)
+            }))
+            .sort((a, b) => b.similarity - a.similarity);
 
-        const relevantChunks = rankedChunks.slice(0, 10);
-        contextText = relevantChunks.map(c => `[DOC: ${c.docName}] CONTENT: ${c.text}`).join('\n\n');
+          const relevantChunks = rankedChunks.slice(0, 10);
+          contextText = relevantChunks.map(c => `[DOC: ${c.docName}] CONTENT: ${c.text}`).join('\n\n');
+        } catch (embedErr) {
+          console.error('Query embedding failed, using local chunk fallback:', embedErr);
+          const terms = query.toLowerCase().split(/\W+/).filter(term => term.length > 2);
+          const rankedChunks = [...processedChunks]
+            .map(chunk => ({
+              ...chunk,
+              score: terms.reduce((score, term) => score + (chunk.text.toLowerCase().includes(term) ? 1 : 0), 0)
+            }))
+            .sort((a, b) => b.score - a.score);
+          const relevantChunks = rankedChunks.slice(0, 10);
+          contextText = relevantChunks.map(c => `[DOC: ${c.docName}] CONTENT: ${c.text}`).join('\n\n');
+        }
       }
 
       // 3. Generate Stream
@@ -878,28 +1204,20 @@ export default function App() {
           - Use monospace formatting for data points.
         `;
 
-      const chat = ai.chats.create({
-        model: "gemini-3-flash-preview",
-        config: { systemInstruction }
-      });
-
-      let responseText = "";
-      const stream = await chat.sendMessageStream({ message: query });
-      
       const assistantId = (Date.now() + 1).toString();
-      setMessages(prev => [...prev, { id: assistantId, role: 'assistant', content: '', confidence: 85 }]);
-
-      for await (const chunk of stream) {
-        responseText += chunk.text;
-        setMessages(prev => prev.map(m => m.id === assistantId ? { ...m, content: responseText } : m));
+      setMessages(prev => [...prev, { id: assistantId, role: 'assistant', content: 'Analyzing document...', confidence: 85 }]);
+      let responseText = '';
+      try {
+        responseText = await generateAiResponse(systemInstruction, query);
+      } catch (aiErr) {
+        responseText = buildLocalDocumentAnswer(query, contextText);
+        setError(`AI_LIMIT: ${getFriendlyAiError(aiErr)}`);
+        setTimeout(() => setError(null), 6000);
       }
+      setMessages(prev => prev.map(m => m.id === assistantId ? { ...m, content: responseText } : m));
 
       // 4. Save to backend
-      await fetch(`/api/chats/${chatId}/messages`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role: 'assistant', content: responseText, confidence: 92 })
-      });
+      await saveChatMessage(chatId, { role: 'assistant', content: responseText, confidence: 92 });
 
       // 5. Update Token Usage
       setTokenUsage(prev => ({
@@ -909,7 +1227,7 @@ export default function App() {
 
     } catch (err) {
       console.error(err);
-      setError('NEURAL_LINK_FAILURE: Check connection or API core status.');
+      setError(`NEURAL_LINK_FAILURE: ${getFriendlyAiError(err)}`);
     } finally {
       setIsThinking(false);
     }
@@ -958,19 +1276,29 @@ export default function App() {
   const generateSummary = async (text) => {
     setIsSummarizing(true);
     try {
+      const localSummary = buildLocalSummary(text);
+      setSummaryText(localSummary);
+
       const prompt = `Provide a comprehensive technical summary of this document. 
       Use bullet points for key takeaways. 
       Format the output in clean Markdown.
       Text: ${text.substring(0, 20000)}`;
       
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: prompt
-      });
-      setSummaryText(response.text);
+      try {
+        const response = await ai.models.generateContent({
+          model: "gemini-3-flash-preview",
+          contents: prompt
+        });
+        const aiSummary = readGeminiText(response);
+        if (aiSummary.trim()) setSummaryText(aiSummary);
+      } catch (aiErr) {
+        console.error('AI summary unavailable, keeping local summary:', aiErr);
+        setError(`AI_LIMIT: ${getFriendlyAiError(aiErr)} Local summary is available.`);
+        setTimeout(() => setError(null), 6000);
+      }
     } catch (err) {
       console.error('Summary generation failure:', err);
-      setSummaryText('FAILED_TO_GENERATE_SUMMARY: Neural core timeout or data corruption.');
+      setSummaryText(buildLocalSummary(text));
     } finally {
       setIsSummarizing(false);
     }
@@ -1006,13 +1334,38 @@ export default function App() {
     }
   };
 
-  const handleShare = async () => {
-    if (!currentChatId) {
-      setError('SELECT_CHAT: Open a session first to share.');
-      return;
-    }
-    setShowShareModal(true);
-  };
+const handleShare = async () => {
+     if (!currentChatId) {
+       setError('SELECT_CHAT: Open a session first to share.');
+       return;
+     }
+     setShowShareModal(true);
+   };
+
+   const generateShareToken = async () => {
+     if (!currentChatId || !userToken) return;
+     try {
+       const res = await fetch(`/api/chats/${currentChatId}/share-token`, {
+         method: 'POST',
+         headers: {
+           'Content-Type': 'application/json',
+           'Authorization': `Bearer ${userToken}`
+         }
+       });
+       const data = await res.json();
+       if (res.ok) {
+         const shareUrl = data.shareUrl || `${window.location.origin}?share=${data.shareToken}`;
+         navigator.clipboard.writeText(shareUrl);
+         setError('SUCCESS: Share link copied (not saved to database).');
+         setTimeout(() => setError(null), 3000);
+         setShowShareModal(false);
+       } else {
+         setError(`SHARE_ERROR: ${data.error}`);
+       }
+     } catch (err) {
+       setError('SHARE_TOKEN_FAILED: Could not generate share token.');
+     }
+   };
 
   const toggleChatSharing = async () => {
     if (!currentChatId || !userToken) return;
@@ -1316,9 +1669,40 @@ export default function App() {
                 className="w-full py-3.5 px-6 bg-gradient-to-r from-ai-purple to-ai-blue text-white font-black text-[11px] tracking-[4px] uppercase flex items-center justify-center gap-2 hover:brightness-110 active:scale-[0.98] transition-all futuristic-glow rounded-xl font-heading mb-8 relative overflow-hidden group shadow-[0_0_20px_rgba(124,58,237,0.4)]"
               >
                 <div className="absolute inset-0 bg-white/10 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-700 skew-x-12" />
-                <Plus size={16} className="text-white" />
-                NEW SESSION
+                <Plus size={16} className="relative z-10 text-white" />
+                <span className="relative z-10">NEW SESSION</span>
               </button>
+
+              <button 
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isUploading}
+                className="w-full py-3 px-5 bg-[#0f172a]/70 border border-ai-blue/20 text-white/80 font-black text-[10px] tracking-[3px] uppercase flex items-center justify-center gap-2 hover:text-white hover:border-ai-blue/50 hover:bg-ai-blue/10 active:scale-[0.98] transition-all rounded-xl font-heading mb-3 shadow-[0_0_14px_rgba(14,165,233,0.12)] disabled:opacity-60 disabled:cursor-wait"
+              >
+                {isUploading ? <Loader2 size={15} className="text-ai-blue animate-spin" /> : <Upload size={15} className="text-ai-blue" />}
+                {isUploading && uploadProgress ? `${uploadProgress.percent}%` : 'UPLOAD FILE'}
+              </button>
+
+              {uploadProgress && (
+                <div className="mb-8 px-1">
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-[8px] font-black text-ai-blue uppercase tracking-[2px] font-heading truncate max-w-[70%]">
+                      {uploadProgress.label}
+                    </p>
+                    <span className="text-[8px] font-black text-white/70 font-mono">{uploadProgress.percent}%</span>
+                  </div>
+                  <div className="h-1.5 w-full bg-white/5 border border-white/10 rounded-full overflow-hidden">
+                    <motion.div
+                      className="h-full bg-gradient-to-r from-ai-purple to-ai-blue"
+                      initial={{ width: 0 }}
+                      animate={{ width: `${uploadProgress.percent}%` }}
+                      transition={{ duration: 0.25 }}
+                    />
+                  </div>
+                  <p className="mt-2 text-[7px] text-gray-600 uppercase tracking-[1px] font-mono truncate">
+                    {uploadProgress.fileName}
+                  </p>
+                </div>
+              )}
         </div>
 
         <div className="flex-1 overflow-y-auto px-2 py-4 space-y-10 custom-scrollbar">
@@ -1386,9 +1770,13 @@ export default function App() {
                       >
                         <div className="flex items-center justify-between">
                           <p className="text-[10px] font-black truncate uppercase tracking-[1px] font-heading flex-1">{chat.title || 'NULL_LOG'}</p>
-                          <div className="w-5 h-5 flex items-center justify-center rounded border border-white/5 opacity-0 group-hover:opacity-100 transition-opacity">
-                            <MessageCircle size={10} className="text-gray-600" />
-                          </div>
+                          <button
+                            onClick={(e) => requestDeleteChat(e, chat)}
+                            className="w-6 h-6 flex items-center justify-center rounded border border-white/5 text-gray-600 opacity-0 group-hover:opacity-100 hover:text-red-400 hover:border-red-500/30 hover:bg-red-500/10 transition-all"
+                            title="Delete chat"
+                          >
+                            <Trash2 size={11} />
+                          </button>
                         </div>
                         <p className="text-[8px] text-ai-purple/60 font-bold tracking-[1px] font-mono opacity-50">
                           {new Date(chat.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })}
@@ -1635,24 +2023,26 @@ export default function App() {
                                <div className="flex-1" />
                                <div className="flex items-center gap-3 opacity-0 group-hover:opacity-100 transition-opacity">
                                   <button 
-                                    onClick={() => {
-                                      const text = `Check out this insight from DocuChat AI:\n\n${msg.content}`;
-                                      const url = `${window.location.origin}?chat=${currentChatId}&msg=${msg.id}`;
-                                      if (navigator.share) {
-                                        navigator.share({ title: 'DocuChat AI Insight', text, url }).catch(() => {});
-                                      } else {
-                                        navigator.clipboard.writeText(`${text}\n\nLink: ${url}`);
-                                        setError('SUCCESS: Answer link copied to clipboard.');
-                                        setTimeout(() => setError(null), 3000);
-                                      }
-                                    }} 
-                                    className="p-1.5 text-gray-500 hover:text-white transition-colors"
-                                    title="Share this answer"
+                                    onClick={() => copyMessageContent(msg)}
+                                    className={`p-1.5 transition-colors ${copiedMessageId === msg.id ? 'text-ai-blue' : 'text-gray-500 hover:text-white'}`}
+                                    title={copiedMessageId === msg.id ? 'Copied' : 'Copy to clipboard'}
                                   >
-                                    <Share2 size={12}/>
+                                    <Copy size={12}/>
                                   </button>
-                                  <button onClick={() => navigator.clipboard.writeText(msg.content)} className="p-1.5 text-gray-500 hover:text-white transition-colors" title="Copy to clipboard"><Copy size={12}/></button>
-                                  <button className="p-1.5 text-gray-500 hover:text-white transition-colors" title="Pin message"><Pin size={12}/></button>
+                                  <button 
+                                    onClick={() => {
+                                      const pinned = getPinnedForMessage(msg.id);
+                                      if (pinned) {
+                                        handleUnpin(pinned._id);
+                                      } else {
+                                        handlePin(msg);
+                                      }
+                                    }}
+                                    className={`p-1.5 transition-colors ${getPinnedForMessage(msg.id) ? 'text-ai-purple' : 'text-gray-500 hover:text-white'}`}
+                                    title={getPinnedForMessage(msg.id) ? 'Unpin message' : 'Pin message'}
+                                  >
+                                    {getPinnedForMessage(msg.id) ? <PinOff size={12}/> : <Pin size={12}/>}
+                                  </button>
                                </div>
                             </div>
                           )}
@@ -1773,15 +2163,7 @@ export default function App() {
                   </div>
 
                   <form onSubmit={handleSendMessage} className="relative">
-                    <div className="flex items-center gap-4 bg-[#0f172a]/80 border border-white/10 p-2 rounded-[24px] focus-within:border-ai-blue/50 transition-all shadow-2xl backdrop-blur-2xl">
-                      <button 
-                        type="button"
-                        onClick={() => fileInputRef.current?.click()}
-                        className="w-12 h-12 flex items-center justify-center text-gray-500 hover:text-white hover:bg-white/5 rounded-full transition-all"
-                      >
-                        <Plus size={20} />
-                      </button>
-                      
+                    <div className="flex items-center gap-4 bg-[#0f172a]/80 border border-white/10 p-2 pl-5 rounded-[24px] focus-within:border-ai-blue/50 transition-all shadow-2xl backdrop-blur-2xl">
                       <input
                         type="text"
                         ref={inputRef}
@@ -2132,75 +2514,58 @@ export default function App() {
                   </button>
                 </div>
 
-                <p className="text-xs text-gray-400 mb-8 font-sans leading-relaxed">Broadcast the entire neural session. Enabling public access generates a unique link accessible to anyone, allowing them to view the full chat history and attached documents.</p>
+                <p className="text-xs text-gray-400 mb-8 font-sans leading-relaxed">Generate a shareable link for this neural session. The link is created temporarily without storing any data in the database - similar to ChatGPT's sharing feature.</p>
                 
                 <div className="space-y-4">
-                  {/* Public Toggle */}
-                  <div className="p-5 bg-white/5 border border-white/10 rounded-2xl flex items-center justify-between group hover:border-ai-blue/30 transition-all">
-                    <div>
-                      <p className="text-[11px] font-bold text-white uppercase tracking-[1px]">Public Neural Access</p>
-                      <p className="text-[9px] text-gray-500 font-mono mt-0.5">{isCurrentChatPublic ? 'Session is world-readable' : 'Session is currently private'}</p>
-                    </div>
-                    <button 
-                      onClick={toggleChatSharing}
-                      className={`relative inline-flex h-5 w-10 items-center rounded-full transition-colors ${isCurrentChatPublic ? 'bg-ai-blue' : 'bg-gray-700'}`}
-                    >
-                      <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${isCurrentChatPublic ? 'translate-x-6' : 'translate-x-1'}`} />
-                    </button>
-                  </div>
+{/* Public Toggle - Removed for ChatGPT-style sharing that doesn't use DB */}
 
-                  <div className="p-4 bg-ai-blue/10 border border-ai-blue/20 rounded-2xl">
-                    <p className="text-[8px] font-bold text-ai-blue uppercase tracking-[2px] mb-2">SHARED_neural_LINK</p>
-                    <div className="flex items-center gap-2 bg-black/40 p-2.5 rounded-xl border border-white/5">
-                      <input 
-                        readOnly 
-                        value={`${window.location.origin}?chat=${currentChatId}`}
-                        className="flex-1 bg-transparent text-[10px] text-gray-400 font-mono outline-none"
-                      />
-                      <button 
-                        onClick={() => {
-                          navigator.clipboard.writeText(`${window.location.origin}?chat=${currentChatId}`);
-                          setError('SUCCESS: Link copied.');
-                          setTimeout(() => setError(null), 2000);
-                        }}
-                        className="p-1.5 hover:text-ai-blue transition-colors"
-                      >
-                        <Copy size={12}/>
-                      </button>
-                    </div>
-                    {!isCurrentChatPublic && (
-                       <p className="text-[8px] text-red-400 mt-2 font-mono uppercase tracking-[1px]">Warning: Link will not work for others unless public access is enabled.</p>
-                    )}
-                  </div>
+                   <div className="p-4 bg-ai-blue/10 border border-ai-blue/20 rounded-2xl">
+                     <p className="text-[8px] font-bold text-ai-blue uppercase tracking-[2px] mb-2">SHARE_TOKEN_LINK</p>
+                     <p className="text-[7px] text-gray-500 mb-3">This link is generated without storing data in the database</p>
+                     <div className="flex items-center gap-2 bg-black/40 p-2.5 rounded-xl border border-white/5">
+                       <input 
+                         readOnly 
+                         value="Click 'Generate Share Link' to create a temporary link"
+                         className="flex-1 bg-transparent text-[10px] text-gray-400 font-mono outline-none"
+                       />
+                     </div>
+                   </div>
 
-                  <div className="grid grid-cols-2 gap-3">
-                    <button 
-                      onClick={async () => {
-                        const shareUrl = `${window.location.origin}?chat=${currentChatId}`;
-                        await navigator.clipboard.writeText(shareUrl);
-                        setError('SUCCESS: Internal link copied.');
-                        setTimeout(() => setError(null), 3000);
-                        setShowShareModal(false);
-                      }}
-                      className="group flex flex-col items-center gap-3 p-5 bg-white/5 border border-white/10 rounded-2xl hover:bg-ai-blue/10 hover:border-ai-blue/50 transition-all text-center"
-                    >
-                      <Link size={20} className="text-ai-blue"/>
-                      <p className="text-[10px] font-bold text-white uppercase tracking-[1px]">Copy Link</p>
-                    </button>
+                   <div className="grid grid-cols-1 gap-3">
+                     <button 
+                       onClick={generateShareToken}
+                       disabled={!currentChatId}
+                       className="group flex items-center justify-center gap-3 p-5 bg-gradient-to-r from-ai-purple to-ai-blue text-white rounded-2xl hover:brightness-110 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                     >
+                       <Share2 size={18}/>
+                       <span className="text-[11px] font-bold uppercase tracking-[1px]">Generate Share Link</span>
+                     </button>
 
-                    <button 
-                      onClick={() => {
-                        const subject = encodeURIComponent(`Shared Neural Session: ${messages[0]?.content.substring(0, 30)}...`);
-                        const body = encodeURIComponent(`Access this full DocuChat AI session here: ${window.location.origin}?chat=${currentChatId}\n\nThis neural stream contains document analyses and transcript logs.`);
-                        window.location.href = `mailto:?subject=${subject}&body=${body}`;
-                        setShowShareModal(false);
-                      }}
-                      className="group flex flex-col items-center gap-3 p-5 bg-white/5 border border-white/10 rounded-2xl hover:bg-ai-purple/10 hover:border-ai-purple/50 transition-all text-center"
-                    >
-                      <Mail size={20} className="text-ai-purple"/>
-                      <p className="text-[10px] font-bold text-white uppercase tracking-[1px]">Email Docs</p>
-                    </button>
-                  </div>
+                     <div className="grid grid-cols-2 gap-3">
+                       <button 
+                         onClick={async () => {
+                           await generateShareToken();
+                         }}
+                         className="group flex flex-col items-center gap-3 p-5 bg-white/5 border border-white/10 rounded-2xl hover:bg-ai-blue/10 hover:border-ai-blue/50 transition-all text-center"
+                       >
+                         <Link size={20} className="text-ai-blue"/>
+                         <p className="text-[10px] font-bold text-white uppercase tracking-[1px]">Generate & Copy</p>
+                       </button>
+
+                       <button 
+                         onClick={() => {
+                           const subject = encodeURIComponent(`Shared NeuroDoc Session`);
+                           const body = encodeURIComponent(`I've shared a NeuroDoc AI session with you. Generate a share link from the app to access it.`);
+                           window.location.href = `mailto:?subject=${subject}&body=${body}`;
+                           setShowShareModal(false);
+                         }}
+                         className="group flex flex-col items-center gap-3 p-5 bg-white/5 border border-white/10 rounded-2xl hover:bg-ai-purple/10 hover:border-ai-purple/50 transition-all text-center"
+                       >
+                         <Mail size={20} className="text-ai-purple"/>
+                         <p className="text-[10px] font-bold text-white uppercase tracking-[1px]">Email Notification</p>
+                       </button>
+                     </div>
+                   </div>
                 </div>
 
                 <button 
@@ -2233,10 +2598,16 @@ export default function App() {
             exit={{ opacity: 0, scale: 0.95, y: -20 }}
             className="fixed top-8 left-1/2 -translate-x-1/2 z-[101] w-full max-w-sm"
           >
-            <div className="mx-4 p-4 glass-panel futuristic-shadow border-red-500/50 flex items-start gap-4 rounded-2xl">
-              <AlertCircle className="text-red-500 shrink-0" size={18} />
+            <div className={`mx-4 p-4 glass-panel futuristic-shadow flex items-start gap-4 rounded-2xl ${error.startsWith('SUCCESS') || error.startsWith('COPIED') || error.startsWith('DOCUMENT_SAVED') || error.startsWith('AI_LIMIT') ? 'border-ai-blue/50' : 'border-red-500/50'}`}>
+              {error.startsWith('SUCCESS') || error.startsWith('COPIED') || error.startsWith('DOCUMENT_SAVED') || error.startsWith('AI_LIMIT') ? (
+                <CheckCircle2 className="text-ai-blue shrink-0" size={18} />
+              ) : (
+                <AlertCircle className="text-red-500 shrink-0" size={18} />
+              )}
               <div className="flex-1">
-                <p className="text-[10px] font-black text-red-500 uppercase tracking-widest font-heading">Protocol_Error</p>
+                <p className={`text-[10px] font-black uppercase tracking-widest font-heading ${error.startsWith('SUCCESS') || error.startsWith('COPIED') || error.startsWith('DOCUMENT_SAVED') || error.startsWith('AI_LIMIT') ? 'text-ai-blue' : 'text-red-500'}`}>
+                  {error.startsWith('SUCCESS') || error.startsWith('COPIED') || error.startsWith('DOCUMENT_SAVED') || error.startsWith('AI_LIMIT') ? 'Status' : 'Protocol_Error'}
+                </p>
                 <p className="text-[11px] text-gray-400 mt-1 leading-relaxed">{error}</p>
               </div>
               <button onClick={() => setError(null)} className="text-gray-600 hover:text-white">
@@ -2518,6 +2889,60 @@ export default function App() {
                       </div>
                     </div>
                   )}
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+      <AnimatePresence>
+        {chatPendingDelete && (
+          <div className="fixed inset-0 z-[2000] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.92, y: 12 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.92, y: 12 }}
+              className="w-full max-w-md bg-[#080b16] border border-red-500/20 rounded-3xl p-7 futuristic-shadow relative overflow-hidden"
+            >
+              <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-red-500/60 to-transparent" />
+              <div className="absolute -right-16 -top-16 w-36 h-36 bg-red-500/10 rounded-full blur-[60px]" />
+              
+              <div className="relative z-10">
+                <div className="flex items-start gap-4 mb-6">
+                  <div className="w-12 h-12 bg-red-500/15 border border-red-500/30 text-red-400 rounded-2xl flex items-center justify-center shrink-0">
+                    <Trash2 size={22} />
+                  </div>
+                  <div className="min-w-0">
+                    <h3 className="text-base font-black text-white uppercase tracking-[2px] font-heading">Delete_Chat?</h3>
+                    <p className="text-[10px] text-gray-500 uppercase tracking-[1px] mt-2 leading-relaxed font-bold">
+                      This conversation and its stored messages will be permanently removed.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="p-4 bg-white/5 border border-white/10 rounded-2xl mb-6">
+                  <p className="text-[8px] font-black text-red-400 uppercase tracking-[2px] mb-2 font-heading">Target Session</p>
+                  <p className="text-[11px] font-black text-white uppercase tracking-[1px] truncate font-heading">
+                    {chatPendingDelete.title || 'NULL_LOG'}
+                  </p>
+                  <p className="text-[8px] text-gray-600 font-mono mt-2">
+                    {new Date(chatPendingDelete.updatedAt).toLocaleString()}
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <button 
+                    onClick={() => setChatPendingDelete(null)}
+                    className="py-3 bg-white/5 border border-white/10 rounded-xl text-[10px] font-black text-white uppercase tracking-[1px] hover:bg-white/10 transition-all font-heading"
+                  >
+                    CANCEL
+                  </button>
+                  <button 
+                    onClick={confirmDeleteChat}
+                    className="py-3 bg-red-500/90 text-white rounded-xl text-[10px] font-black uppercase tracking-[1px] hover:bg-red-500 hover:shadow-[0_0_18px_rgba(239,68,68,0.35)] transition-all font-heading"
+                  >
+                    DELETE
+                  </button>
                 </div>
               </div>
             </motion.div>

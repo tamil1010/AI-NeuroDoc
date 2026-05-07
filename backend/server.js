@@ -49,8 +49,8 @@ async function startServer() {
   });
 
   app.use(cors());
-  app.use(express.json({ limit: '5mb' }));
-  app.use(express.urlencoded({ limit: '5mb', extended: true }));
+  app.use(express.json({ limit: '50mb' }));
+  app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
   // MongoDB Schemas
   const UserSchema = new mongoose.Schema({
@@ -71,8 +71,11 @@ async function startServer() {
 
   const DocumentSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    chatId: { type: mongoose.Schema.Types.ObjectId, ref: 'Chat' },
     name: String,
     pageCount: Number,
+    content: String,
+    chunks: [String],
     uploadDate: { type: Date, default: Date.now }
   });
 
@@ -108,10 +111,13 @@ async function startServer() {
   const Document = mongoose.models.Document || mongoose.model('Document', DocumentSchema);
   const PinnedMessage = mongoose.models.PinnedMessage || mongoose.model('PinnedMessage', PinnedMessageSchema);
 
-  // In-memory fallback
-  let inMemoryChats = [];
-  let inMemoryDocs = [];
-  let inMemoryPins = [];
+// In-memory fallback
+   let inMemoryChats = [];
+   let inMemoryDocs = [];
+   let inMemoryPins = [];
+   
+   // In-memory share storage (ChatGPT-style - no DB)
+   const sharedSessions = new Map(); // token -> { messages, documents, createdAt }
 
   // PIN APIs (updated with userId)
   const authenticate = async (req, res, next) => {
@@ -378,6 +384,16 @@ async function startServer() {
           documents: documents || []
         });
         await chat.save();
+        if (Array.isArray(documents) && documents.length > 0) {
+          await Document.insertMany(documents.map(doc => ({
+            userId: req.userId,
+            chatId: chat._id,
+            name: doc.name,
+            pageCount: doc.pageCount,
+            content: doc.content,
+            chunks: doc.chunks || []
+          })));
+        }
         return res.status(201).json(chat);
       }
       const newChat = { 
@@ -400,7 +416,12 @@ async function startServer() {
       if (mongoose.connection.readyState === 1) {
         const chat = await Chat.findOne({ _id: req.params.id, userId: req.userId });
         if (!chat) return res.status(404).json({ error: 'Log not found' });
-        return res.json(chat);
+        const savedDocuments = await Document.find({ chatId: req.params.id, userId: req.userId });
+        const chatData = chat.toObject();
+        if (savedDocuments.length > 0) {
+          chatData.documents = savedDocuments;
+        }
+        return res.json(chatData);
       }
       const chat = inMemoryChats.find(c => c._id === req.params.id && c.userId === req.userId);
       if (!chat) return res.status(404).json({ error: 'Log not found' });
@@ -435,6 +456,65 @@ async function startServer() {
     }
   });
 
+  // Generate share token WITHOUT storing in DB (ChatGPT-style)
+  app.post('/api/chats/:id/share-token', authenticate, async (req, res) => {
+    try {
+      const chatId = req.params.id;
+      
+      // Get chat - from DB or in-memory
+      let chat = null;
+      if (mongoose.connection.readyState === 1) {
+        chat = await Chat.findOne({ _id: chatId, userId: req.userId });
+      }
+      if (!chat) {
+        chat = inMemoryChats.find(c => c._id === chatId && c.userId === req.userId);
+      }
+      if (!chat) return res.status(404).json({ error: 'Log not found' });
+
+      // Generate unique token
+      const token = 'share_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+      
+      // Store in memory only (NOT in database)
+      sharedSessions.set(token, {
+        messages: chat.messages,
+        documents: chat.documents || [],
+        createdAt: new Date().toISOString()
+      });
+
+      // Clean up old sessions after 24 hours (optional maintenance)
+      setTimeout(() => {
+        sharedSessions.delete(token);
+      }, 24 * 60 * 60 * 1000);
+
+      res.json({ 
+        shareToken: token,
+        shareUrl: `${process.env.FRONTEND_URL || req.headers.origin || ''}?share=${token}`
+      });
+    } catch (err) {
+      console.error('Share token error:', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Get shared session by token (no auth required)
+  app.get('/api/shared/:token', async (req, res) => {
+    try {
+      const session = sharedSessions.get(req.params.token);
+      if (!session) {
+        return res.status(404).json({ error: 'Shared session not found or expired' });
+      }
+      
+      // Return messages and documents without storing in DB
+      res.json({
+        messages: session.messages,
+        documents: session.documents,
+        isShared: true
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.post('/api/chats/:id/messages', authenticate, async (req, res) => {
     try {
       const { role, content, confidence } = req.body;
@@ -462,10 +542,64 @@ async function startServer() {
     }
   });
 
+  app.post('/api/chats/:id/documents', authenticate, async (req, res) => {
+    try {
+      const { name, pageCount, content, chunks } = req.body;
+      if (!name) return res.status(400).json({ error: 'Document name is required' });
+      const contentText = typeof content === 'string' ? content : '';
+      const chunkList = Array.isArray(chunks) ? chunks : [];
+      const maxContentLength = 10 * 1024 * 1024;
+      const savedContent = contentText.length > maxContentLength
+        ? contentText.slice(0, maxContentLength)
+        : contentText;
+
+      const documentPayload = {
+        userId: req.userId,
+        chatId: req.params.id,
+        name,
+        pageCount,
+        content: savedContent,
+        chunks: chunkList
+      };
+
+      const chatDocumentMetadata = {
+        userId: req.userId,
+        chatId: req.params.id,
+        name,
+        pageCount
+      };
+
+      if (mongoose.connection.readyState === 1) {
+        const chat = await Chat.findOne({ _id: req.params.id, userId: req.userId });
+        if (!chat) return res.status(404).json({ error: 'Log not found' });
+
+        const document = new Document(documentPayload);
+        await document.save();
+
+        chat.documents.push(chatDocumentMetadata);
+        chat.updatedAt = new Date();
+        await chat.save();
+
+        return res.status(201).json(document);
+      }
+
+      const chat = inMemoryChats.find(c => c._id === req.params.id && c.userId === req.userId);
+      if (!chat) return res.status(404).json({ error: 'Log not found' });
+      const document = { _id: Date.now().toString(), ...documentPayload, uploadDate: new Date() };
+      inMemoryDocs.push(document);
+      chat.documents.push(chatDocumentMetadata);
+      chat.updatedAt = new Date();
+      res.status(201).json(document);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.delete('/api/chats/:id', authenticate, async (req, res) => {
     try {
       if (mongoose.connection.readyState === 1) {
         await Chat.findOneAndDelete({ _id: req.params.id, userId: req.userId });
+        await Document.deleteMany({ chatId: req.params.id, userId: req.userId });
         return res.json({ message: 'Chat deleted' });
       }
       inMemoryChats = inMemoryChats.filter(c => c._id !== req.params.id);
