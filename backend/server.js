@@ -6,6 +6,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import fs from 'fs/promises';
+import { mkdirSync } from 'fs';
 import { createRequire } from 'module';
 
 dotenv.config();
@@ -19,8 +20,14 @@ const PORT = process.env.PORT || 5000;
 
 // Multer config for PDF uploads
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
+mkdirSync(UPLOADS_DIR, { recursive: true });
 const upload = multer({
-  dest: UPLOADS_DIR,
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      mkdirSync(UPLOADS_DIR, { recursive: true });
+      cb(null, UPLOADS_DIR);
+    }
+  }),
   fileFilter: (req, file, cb) => {
     if (file.mimetype === 'application/pdf') {
       cb(null, true);
@@ -249,12 +256,34 @@ async function startServer() {
   app.delete('/api/user/data', authenticate, async (req, res) => {
     try {
       const { type } = req.query; // 'chats', 'docs', 'all'
+      if (!['chats', 'docs', 'all'].includes(type)) {
+        return res.status(400).json({ error: 'Invalid data type' });
+      }
+
+      if (mongoose.connection.readyState !== 1) {
+        if (type === 'chats' || type === 'all') {
+          inMemoryChats = inMemoryChats.filter(c => c.userId !== req.userId);
+        }
+        if (type === 'docs' || type === 'all') {
+          inMemoryDocs = inMemoryDocs.filter(d => d.userId !== req.userId);
+          inMemoryChats = inMemoryChats.map(chat => (
+            chat.userId === req.userId ? { ...chat, documents: [] } : chat
+          ));
+        }
+        if (type === 'chats' || type === 'docs' || type === 'all') {
+          inMemoryPins = inMemoryPins.filter(p => p.userId !== req.userId);
+        }
+        return res.json({ message: `Successfully cleared ${type} data` });
+      }
+
       if (type === 'chats' || type === 'all') {
         await Chat.deleteMany({ userId: req.userId });
         await PinnedMessage.deleteMany({ userId: req.userId });
       }
       if (type === 'docs' || type === 'all') {
         await Document.deleteMany({ userId: req.userId });
+        await Chat.updateMany({ userId: req.userId }, { $set: { documents: [] } });
+        await PinnedMessage.deleteMany({ userId: req.userId });
       }
       res.json({ message: `Successfully cleared ${type} data` });
     } catch (err) {
@@ -600,9 +629,12 @@ async function startServer() {
       if (mongoose.connection.readyState === 1) {
         await Chat.findOneAndDelete({ _id: req.params.id, userId: req.userId });
         await Document.deleteMany({ chatId: req.params.id, userId: req.userId });
+        await PinnedMessage.deleteMany({ chatId: req.params.id, userId: req.userId });
         return res.json({ message: 'Chat deleted' });
       }
       inMemoryChats = inMemoryChats.filter(c => c._id !== req.params.id);
+      inMemoryDocs = inMemoryDocs.filter(d => d.chatId !== req.params.id);
+      inMemoryPins = inMemoryPins.filter(p => p.chatId !== req.params.id);
       res.json({ message: 'Chat deleted' });
     } catch (err) {
       res.status(500).json({ error: err.message });

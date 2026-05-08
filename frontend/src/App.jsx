@@ -434,12 +434,14 @@ export default function App() {
       if (res.ok) {
         if (type === 'chats' || type === 'all') {
           setChats([]);
+          setPinnedMessages([]);
           setMessages([{ id: '1', role: 'assistant', content: 'Chat history cleared. System ready.' }]);
           setCurrentChatId(null);
         }
         if (type === 'docs' || type === 'all') {
           setDocuments([]);
           setProcessedChunks([]);
+          setPinnedMessages([]);
         }
         fetchUserData(); // Refresh stats
       }
@@ -660,6 +662,7 @@ export default function App() {
         headers: getAuthHeaders()
       });
       setChats(prev => prev.filter(c => c._id !== chatId));
+      setPinnedMessages(prev => prev.filter(pin => pin.chatId !== chatId));
       if (currentChatId === chatId) {
         startNewChatSession();
       }
