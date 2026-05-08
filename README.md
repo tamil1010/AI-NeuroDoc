@@ -146,5 +146,7 @@ VITE_GEMINI_API_KEY=your_gemini_api_key
 # 🌐 Deployment
 
 Frontend → Vercel
+
 Backend → Render
+
 Database → MongoDB Atlas
