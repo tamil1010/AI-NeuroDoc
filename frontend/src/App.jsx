@@ -2631,13 +2631,6 @@ const handleShare = async () => {
               <div className="absolute top-0 right-0 w-64 h-64 bg-ai-purple/10 rounded-full blur-[100px] -mr-32 -mt-32" />
               <div className="absolute bottom-0 left-0 w-64 h-64 bg-ai-blue/10 rounded-full blur-[100px] -ml-32 -mb-32" />
 
-              <button 
-                onClick={() => setActiveModal(null)}
-                className="absolute top-6 right-6 p-2 text-gray-500 hover:text-white hover:bg-white/5 rounded-full transition-all"
-              >
-                <X size={20} />
-              </button>
-
               <div className="relative z-10">
                 <div className="flex items-center gap-4 mb-8">
                   <button 
