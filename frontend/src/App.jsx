@@ -264,6 +264,8 @@ export default function App() {
     apiKey: import.meta.env.VITE_GEMINI_API_KEY
   });
 
+  const API = import.meta.env.VITE_API_URL;
+  
   useEffect(() => {
     if (userToken) {
       fetchUserData();
