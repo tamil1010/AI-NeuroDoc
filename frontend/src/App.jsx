@@ -294,7 +294,7 @@ export default function App() {
   const loadSharedChatByToken = async (token) => {
     setIsLoadingHistory(true);
     try {
-      const res = await fetch(`/api/shared/${token}`);
+      const res = await fetch(`https://ai-neurodoc.onrender.com/api/shared/${token}`);
       const data = await res.json();
       if (res.ok) {
         setMessages(data.messages || []);
@@ -316,7 +316,7 @@ export default function App() {
   const loadSharedChat = async (chatId) => {
     setIsLoadingHistory(true);
     try {
-      const res = await fetch(`/api/public-chats/${chatId}`);
+      const res = await fetch(`https://ai-neurodoc.onrender.com/api/public-chats/${chatId}`);
       const data = await res.json();
       if (res.ok) {
         setMessages(data.messages);
@@ -337,7 +337,7 @@ export default function App() {
 
   const fetchUserData = async () => {
     try {
-      const res = await fetch('/api/user/me', {
+      const res = await fetch('https://ai-neurodoc.onrender.com/api/user/me', {
         headers: { 'Authorization': `Bearer ${userToken}` }
       });
       const data = await res.json();
@@ -368,7 +368,7 @@ export default function App() {
     }
 
     try {
-      const res = await fetch('/api/user/preferences', {
+      const res = await fetch('https://ai-neurodoc.onrender.com/api/user/preferences', {
         method: 'PATCH',
         headers: { 
           'Content-Type': 'application/json',
@@ -391,7 +391,7 @@ export default function App() {
 
   const updateProfile = async (profileData) => {
     try {
-      const res = await fetch('/api/user/profile', {
+      const res = await fetch('https://ai-neurodoc.onrender.com/api/user/profile', {
         method: 'PATCH',
         headers: { 
           'Content-Type': 'application/json',
@@ -429,7 +429,7 @@ export default function App() {
   const clearUserData = async (type) => {
     if (!window.confirm(`Permanently wipe all ${type} from neural core?`)) return;
     try {
-      const res = await fetch(`/api/user/data?type=${type}`, {
+      const res = await fetch(`https://ai-neurodoc.onrender.com/api/user/data?type=${type}`, {
         method: 'DELETE',
         headers: { 'Authorization': `Bearer ${userToken}` }
       });
@@ -523,7 +523,7 @@ export default function App() {
   const fetchPins = async () => {
     if (!userToken) return;
     try {
-      const res = await fetch('/api/pins', {
+      const res = await fetch('https://ai-neurodoc.onrender.com/api/pins', {
         headers: { 'Authorization': `Bearer ${userToken}` }
       });
       const data = await res.json();
@@ -535,7 +535,7 @@ export default function App() {
 
   const handlePin = async (msg) => {
     try {
-      const res = await fetch('/api/pins', {
+      const res = await fetch('https://ai-neurodoc.onrender.com/api/pins', {
         method: 'POST',
         headers: getJsonHeaders(),
         body: JSON.stringify({
@@ -553,7 +553,7 @@ export default function App() {
 
   const handleUnpin = async (pinId) => {
     try {
-      await fetch(`/api/pins/${pinId}`, {
+      await fetch(`https://ai-neurodoc.onrender.com/api/pins/${pinId}`, {
         method: 'DELETE',
         headers: getAuthHeaders()
       });
@@ -583,7 +583,7 @@ export default function App() {
 
   const fetchChats = async () => {
     try {
-      const res = await fetch('/api/chats', {
+      const res = await fetch('https://ai-neurodoc.onrender.com/api/chats', {
         headers: {
           Authorization: `Bearer ${userToken}`
         }
@@ -599,7 +599,7 @@ export default function App() {
     setIsLoadingHistory(true);
     setCurrentChatId(chatId);
     try {
-      const res = await fetch(`/api/chats/${chatId}`, {
+      const res = await fetch(`https://ai-neurodoc.onrender.com/api/chats/${chatId}`, {
         headers: getAuthHeaders()
       });
       const data = await res.json();
@@ -659,7 +659,7 @@ export default function App() {
     if (!chatPendingDelete) return;
     const chatId = chatPendingDelete._id;
     try {
-      await fetch(`/api/chats/${chatId}`, {
+      await fetch(`https://ai-neurodoc.onrender.com/api/chats/${chatId}`, {
         method: 'DELETE',
         headers: getAuthHeaders()
       });
@@ -724,7 +724,7 @@ export default function App() {
     if (!userToken) return null;
     if (currentChatId) return currentChatId;
 
-    const chatRes = await fetch('/api/chats', {
+    const chatRes = await fetch('https://ai-neurodoc.onrender.com/api/chats', {
       method: 'POST',
       headers: getJsonHeaders(),
       body: JSON.stringify({ title, messages: [], documents: [] })
@@ -740,7 +740,7 @@ export default function App() {
   };
 
   const persistDocumentContent = async (chatId, doc, content, chunks) => {
-    const docRes = await fetch(`/api/chats/${chatId}/documents`, {
+    const docRes = await fetch(`https://ai-neurodoc.onrender.com/api/chats/${chatId}/documents`, {
       method: 'POST',
       headers: getJsonHeaders(),
       body: JSON.stringify({
@@ -760,7 +760,7 @@ export default function App() {
   const saveChatMessage = async (chatId, message) => {
     if (!userToken || !chatId) return null;
 
-    const res = await fetch(`/api/chats/${chatId}/messages`, {
+    const res = await fetch(`https://ai-neurodoc.onrender.com/api/chats/${chatId}/messages`, {
       method: 'POST',
       headers: getJsonHeaders(),
       body: JSON.stringify(message)
@@ -1085,7 +1085,7 @@ export default function App() {
 
       if (userToken) {
         const chatId = persistedChatId || await ensurePersistedChat(file.name.substring(0, 30).toUpperCase());
-        await fetch(`/api/chats/${chatId}/messages`, {
+        await fetch(`https://ai-neurodoc.onrender.com/api/chats/${chatId}/messages`, {
           method: 'POST',
           headers: getJsonHeaders(),
           body: JSON.stringify({ role: 'system', content: systemMessage.content })
@@ -1124,7 +1124,7 @@ export default function App() {
 
       // 1. Ensure/Create Chat Session
       if (!chatId) {
-        const chatRes = await fetch('/api/chats', {
+        const chatRes = await fetch('https://ai-neurodoc.onrender.com/api/chats', {
           method: 'POST',
           headers: getJsonHeaders(),
           body: JSON.stringify({
@@ -1350,7 +1350,7 @@ const handleShare = async () => {
    const generateShareToken = async () => {
      if (!currentChatId || !userToken) return;
      try {
-       const res = await fetch(`/api/chats/${currentChatId}/share-token`, {
+       const res = await fetch(`https://ai-neurodoc.onrender.com/api/chats/${currentChatId}/share-token`, {
          method: 'POST',
          headers: {
            'Content-Type': 'application/json',
@@ -1375,7 +1375,7 @@ const handleShare = async () => {
   const toggleChatSharing = async () => {
     if (!currentChatId || !userToken) return;
     try {
-      const res = await fetch(`/api/chats/${currentChatId}/share`, {
+      const res = await fetch(`https://ai-neurodoc.onrender.com/api/chats/${currentChatId}/share`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -1400,7 +1400,7 @@ const handleShare = async () => {
     setExporting(true);
     try {
       const chat = chats.find(c => c._id === currentChatId);
-      const res = await fetch('/api/export', {
+      const res = await fetch('https://ai-neurodoc.onrender.com/api/export', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1491,7 +1491,7 @@ const handleShare = async () => {
 
       setIsCheckingEmail(true);
       try {
-        const res = await fetch('/api/auth/check-email', {
+        const res = await fetch('https://ai-neurodoc.onrender.com/api/auth/check-email', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email: authForm.email })
