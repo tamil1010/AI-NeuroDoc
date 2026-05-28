@@ -39,7 +39,7 @@ const upload = multer({
 
 async function startServer() {
   console.log('Starting server initialization...');
-  
+
   // Ensure uploads directory exists
   try {
     await fs.mkdir(UPLOADS_DIR, { recursive: true });
@@ -47,7 +47,6 @@ async function startServer() {
   } catch (err) {
     console.warn('Error creating uploads directory:', err.message);
   }
-  
 
   // Request logger middleware
   app.use((req, res, next) => {
@@ -55,7 +54,11 @@ async function startServer() {
     next();
   });
 
-  app.use(cors());
+  app.use(cors({
+    origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+    credentials: true
+  }));
+
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
@@ -67,10 +70,10 @@ async function startServer() {
     avatar: String,
     createdAt: { type: Date, default: Date.now },
     preferences: {
-      theme: { type: String, default: 'VOID_BLACK' }, // 'CYBER_NEON', 'VOID_BLACK', 'QUANTUM_LIGHT', 'SPACE_PURPLE', 'CYBER_GREEN'
-      fontSize: { type: String, default: 'medium' }, // 'small', 'medium', 'large'
-      chatBubbleStyle: { type: String, default: 'futuristic' }, // 'futuristic', 'minimal'
-      responseStyle: { type: String, default: 'detailed' }, // 'concise', 'detailed', 'professional'
+      theme: { type: String, default: 'VOID_BLACK' },
+      fontSize: { type: String, default: 'medium' },
+      chatBubbleStyle: { type: String, default: 'futuristic' },
+      responseStyle: { type: String, default: 'detailed' },
       notifications: { type: Boolean, default: true },
       voiceInput: { type: Boolean, default: true }
     }
@@ -118,20 +121,20 @@ async function startServer() {
   const Document = mongoose.models.Document || mongoose.model('Document', DocumentSchema);
   const PinnedMessage = mongoose.models.PinnedMessage || mongoose.model('PinnedMessage', PinnedMessageSchema);
 
-// In-memory fallback
-   let inMemoryChats = [];
-   let inMemoryDocs = [];
-   let inMemoryPins = [];
-   
-   // In-memory share storage (ChatGPT-style - no DB)
-   const sharedSessions = new Map(); // token -> { messages, documents, createdAt }
+  // In-memory fallback
+  let inMemoryChats = [];
+  let inMemoryDocs = [];
+  let inMemoryPins = [];
 
-  // PIN APIs (updated with userId)
+  // In-memory share storage (ChatGPT-style - no DB)
+  const sharedSessions = new Map();
+
+  // Authenticate middleware
   const authenticate = async (req, res, next) => {
     try {
       const token = req.headers.authorization?.split(' ')[1];
       if (!token) return res.status(401).json({ error: 'Auth required' });
-      
+
       const jwt = (await import('jsonwebtoken')).default;
       const decoded = jwt.verify(token, process.env.JWT_SECRET || 'neurodoc_secret');
       req.userId = decoded.userId;
@@ -141,7 +144,8 @@ async function startServer() {
     }
   };
 
-  // Auth Endpoints
+  // ─── Auth Endpoints ────────────────────────────────────────────────────────
+
   app.post('/api/auth/signup', async (req, res) => {
     try {
       const { email, password, name } = req.body;
@@ -196,16 +200,17 @@ async function startServer() {
     }
   });
 
+  // ─── User Endpoints ────────────────────────────────────────────────────────
+
   app.get('/api/user/me', authenticate, async (req, res) => {
     try {
       const user = await User.findById(req.userId);
       if (!user) return res.status(404).json({ error: 'User not found' });
-      
-      // Calculate stats
+
       const docsCount = await Document.countDocuments({ userId: req.userId });
       const chatsCount = await Chat.countDocuments({ userId: req.userId });
-      
-      res.json({ 
+
+      res.json({
         user: { id: user._id, email: user.email, name: user.name, avatar: user.avatar, preferences: user.preferences, createdAt: user.createdAt },
         stats: { docsCount, chatsCount }
       });
@@ -218,7 +223,6 @@ async function startServer() {
     try {
       if (mongoose.connection.readyState !== 1) {
         console.warn('Database offline during preference update');
-        // Return 200 but warn if DB is down, frontend used optimistic update
         return res.status(503).json({ error: 'Neuromapping core is temporarily offline (DB_DISCONNECTED)' });
       }
 
@@ -227,7 +231,7 @@ async function startServer() {
         console.warn(`User ${req.userId} not found for preference update`);
         return res.status(404).json({ error: 'Neural identity not found' });
       }
-      
+
       console.log(`Updating preferences for user ${user.email}:`, req.body);
       user.preferences = { ...user.preferences.toObject(), ...req.body };
       await user.save();
@@ -243,7 +247,7 @@ async function startServer() {
       const { name, avatar } = req.body;
       const user = await User.findById(req.userId);
       if (!user) return res.status(404).json({ error: 'User not found' });
-      
+
       if (name) user.name = name;
       if (avatar) user.avatar = avatar;
       await user.save();
@@ -255,7 +259,7 @@ async function startServer() {
 
   app.delete('/api/user/data', authenticate, async (req, res) => {
     try {
-      const { type } = req.query; // 'chats', 'docs', 'all'
+      const { type } = req.query;
       if (!['chats', 'docs', 'all'].includes(type)) {
         return res.status(400).json({ error: 'Invalid data type' });
       }
@@ -291,15 +295,18 @@ async function startServer() {
     }
   });
 
-  // Health check
+  // ─── Health Check (uses isReady via closure) ───────────────────────────────
+
   app.get('/api/health', (req, res) => {
-    res.json({ 
-      status: 'ok', 
-      db: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected' 
+    if (!isReady) return res.status(503).json({ status: 'starting' });
+    res.json({
+      status: 'ok',
+      db: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
     });
   });
 
-  // Pin APIs
+  // ─── Pin Endpoints ─────────────────────────────────────────────────────────
+
   app.get('/api/pins', authenticate, async (req, res) => {
     try {
       if (mongoose.connection.readyState === 1) {
@@ -341,11 +348,12 @@ async function startServer() {
     }
   });
 
-  // Export API
+  // ─── Export Endpoint ───────────────────────────────────────────────────────
+
   app.post('/api/export', async (req, res) => {
     try {
       const { format, messages, title } = req.body;
-      
+
       if (format === 'json') {
         res.setHeader('Content-Type', 'application/json');
         res.setHeader('Content-Disposition', `attachment; filename="${title || 'chat'}.json"`);
@@ -362,22 +370,22 @@ async function startServer() {
       if (format === 'pdf') {
         const PDFDocument = (await import('pdfkit')).default;
         const doc = new PDFDocument();
-        
+
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition', `attachment; filename="${title || 'chat'}.pdf"`);
-        
+
         doc.pipe(res);
         doc.fontSize(20).text(title || 'NEURODOC Session Export', { align: 'center' });
         doc.moveDown();
         doc.fontSize(10).text(`Exported on: ${new Date().toLocaleString()}`, { align: 'right' });
         doc.moveDown();
-        
+
         messages.forEach(m => {
           doc.fontSize(12).fillColor(m.role === 'user' ? 'blue' : 'black').text(m.role.toUpperCase(), { underline: true });
           doc.fontSize(10).fillColor('black').text(m.content);
           doc.moveDown();
         });
-        
+
         doc.end();
         return;
       }
@@ -389,7 +397,8 @@ async function startServer() {
     }
   });
 
-  // Chat APIs
+  // ─── Chat Endpoints ────────────────────────────────────────────────────────
+
   app.get('/api/chats', authenticate, async (req, res) => {
     try {
       if (mongoose.connection.readyState === 1) {
@@ -406,9 +415,9 @@ async function startServer() {
     try {
       const { title, messages, documents } = req.body;
       if (mongoose.connection.readyState === 1) {
-        const chat = new Chat({ 
+        const chat = new Chat({
           userId: req.userId,
-          title: title || 'INITIATED_LOG', 
+          title: title || 'INITIATED_LOG',
           messages: messages || [],
           documents: documents || []
         });
@@ -425,13 +434,13 @@ async function startServer() {
         }
         return res.status(201).json(chat);
       }
-      const newChat = { 
-        _id: Date.now().toString(), 
+      const newChat = {
+        _id: Date.now().toString(),
         userId: req.userId,
-        title: title || 'INITIATED_LOG', 
-        messages: messages || [], 
+        title: title || 'INITIATED_LOG',
+        messages: messages || [],
         documents: documents || [],
-        updatedAt: new Date() 
+        updatedAt: new Date()
       };
       inMemoryChats.push(newChat);
       res.status(201).json(newChat);
@@ -447,9 +456,7 @@ async function startServer() {
         if (!chat) return res.status(404).json({ error: 'Log not found' });
         const savedDocuments = await Document.find({ chatId: req.params.id, userId: req.userId });
         const chatData = chat.toObject();
-        if (savedDocuments.length > 0) {
-          chatData.documents = savedDocuments;
-        }
+        if (savedDocuments.length > 0) chatData.documents = savedDocuments;
         return res.json(chatData);
       }
       const chat = inMemoryChats.find(c => c._id === req.params.id && c.userId === req.userId);
@@ -485,12 +492,10 @@ async function startServer() {
     }
   });
 
-  // Generate share token WITHOUT storing in DB (ChatGPT-style)
   app.post('/api/chats/:id/share-token', authenticate, async (req, res) => {
     try {
       const chatId = req.params.id;
-      
-      // Get chat - from DB or in-memory
+
       let chat = null;
       if (mongoose.connection.readyState === 1) {
         chat = await Chat.findOne({ _id: chatId, userId: req.userId });
@@ -500,22 +505,17 @@ async function startServer() {
       }
       if (!chat) return res.status(404).json({ error: 'Log not found' });
 
-      // Generate unique token
       const token = 'share_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-      
-      // Store in memory only (NOT in database)
+
       sharedSessions.set(token, {
         messages: chat.messages,
         documents: chat.documents || [],
         createdAt: new Date().toISOString()
       });
 
-      // Clean up old sessions after 24 hours (optional maintenance)
-      setTimeout(() => {
-        sharedSessions.delete(token);
-      }, 24 * 60 * 60 * 1000);
+      setTimeout(() => sharedSessions.delete(token), 24 * 60 * 60 * 1000);
 
-      res.json({ 
+      res.json({
         shareToken: token,
         shareUrl: `${process.env.FRONTEND_URL || req.headers.origin || ''}?share=${token}`
       });
@@ -525,20 +525,11 @@ async function startServer() {
     }
   });
 
-  // Get shared session by token (no auth required)
   app.get('/api/shared/:token', async (req, res) => {
     try {
       const session = sharedSessions.get(req.params.token);
-      if (!session) {
-        return res.status(404).json({ error: 'Shared session not found or expired' });
-      }
-      
-      // Return messages and documents without storing in DB
-      res.json({
-        messages: session.messages,
-        documents: session.documents,
-        isShared: true
-      });
+      if (!session) return res.status(404).json({ error: 'Shared session not found or expired' });
+      res.json({ messages: session.messages, documents: session.documents, isShared: true });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -550,14 +541,14 @@ async function startServer() {
       if (mongoose.connection.readyState === 1) {
         const chat = await Chat.findOne({ _id: req.params.id, userId: req.userId });
         if (!chat) return res.status(404).json({ error: 'Log not found' });
-        
+
         chat.messages.push({ role, content, confidence });
         chat.updatedAt = new Date();
-        
+
         if (chat.title === 'INITIATED_LOG' && role === 'user') {
           chat.title = content.substring(0, 30).toUpperCase();
         }
-        
+
         await chat.save();
         return res.json(chat);
       }
@@ -575,28 +566,14 @@ async function startServer() {
     try {
       const { name, pageCount, content, chunks } = req.body;
       if (!name) return res.status(400).json({ error: 'Document name is required' });
+
       const contentText = typeof content === 'string' ? content : '';
       const chunkList = Array.isArray(chunks) ? chunks : [];
       const maxContentLength = 10 * 1024 * 1024;
-      const savedContent = contentText.length > maxContentLength
-        ? contentText.slice(0, maxContentLength)
-        : contentText;
+      const savedContent = contentText.length > maxContentLength ? contentText.slice(0, maxContentLength) : contentText;
 
-      const documentPayload = {
-        userId: req.userId,
-        chatId: req.params.id,
-        name,
-        pageCount,
-        content: savedContent,
-        chunks: chunkList
-      };
-
-      const chatDocumentMetadata = {
-        userId: req.userId,
-        chatId: req.params.id,
-        name,
-        pageCount
-      };
+      const documentPayload = { userId: req.userId, chatId: req.params.id, name, pageCount, content: savedContent, chunks: chunkList };
+      const chatDocumentMetadata = { userId: req.userId, chatId: req.params.id, name, pageCount };
 
       if (mongoose.connection.readyState === 1) {
         const chat = await Chat.findOne({ _id: req.params.id, userId: req.userId });
@@ -641,33 +618,28 @@ async function startServer() {
     }
   });
 
-  // PDF Extraction endpoint
+  // ─── PDF Extraction ────────────────────────────────────────────────────────
+
   app.post('/api/extract-text', upload.single('pdf'), async (req, res) => {
     try {
-      if (!req.file) {
-        return res.status(400).json({ error: 'No file uploaded' });
-      }
+      if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
       console.log('Processing file:', req.file.originalname, 'Size:', req.file.size);
       const dataBuffer = await fs.readFile(req.file.path);
-      
+
       let text = '';
       let numpages = 0;
       let info = {};
 
       try {
-        // High-compatibility import logic
         let pdfMod;
         try {
-          // Try standard ESM import
           pdfMod = await import('pdf-parse');
         } catch (e) {
-          // Fallback to local require
           const localRequire = createRequire(import.meta.url);
           pdfMod = localRequire('pdf-parse');
         }
 
-        // Handle different versions of pdf-parse
         if (pdfMod && pdfMod.PDFParse) {
           console.log('Using pdf-parse v2+ API');
           const parser = new pdfMod.PDFParse({ data: dataBuffer });
@@ -681,7 +653,6 @@ async function startServer() {
             if (parser.destroy) await parser.destroy().catch(() => {});
           }
         } else {
-          // Version 1.x or simplified object
           console.log('Using pdf-parse functional API');
           const pdfExtract = pdfMod.default || pdfMod;
           const data = await (typeof pdfExtract === 'function' ? pdfExtract(dataBuffer) : pdfExtract.pdf(dataBuffer));
@@ -705,56 +676,56 @@ async function startServer() {
       }
 
       console.log('Extraction complete. Pages:', numpages);
-      
-      // Clean up uploaded file
       await fs.unlink(req.file.path).catch(err => console.error('Cleanup error:', err));
 
-      res.json({
-        text,
-        info,
-        numpages,
-        filename: req.file.originalname
-      });
+      res.json({ text, info, numpages, filename: req.file.originalname });
     } catch (error) {
       console.error('API Error:', error);
       res.status(500).json({ error: error.message || 'Internal server error' });
     }
   });
 
-  // For development: Vite middleware
-  const isProduction = process.env.NODE_ENV === 'production';
-  console.log(`Server environment: ${isProduction ? 'PRODUCTION' : 'DEVELOPMENT'}`);
-  
-  // MongoDB connection (restored)
-  const MONGODB_URI = process.env.MONGODB_URI;
-
-  //console.log("Mongo URI:", MONGODB_URI);
-
-  if (!MONGODB_URI) {
-    console.error("MONGODB_URI missing in .env");
-    process.exit(1);
-  }
-
-  mongoose.connect(MONGODB_URI)
-    .then(() => {
-      console.log("MongoDB Connected");
-    })
-    .catch(err => {
-      console.error("MongoDB connection error:", err.message);
-    });
+  // ─── Root Route ────────────────────────────────────────────────────────────
 
   app.get('/', (req, res) => {
     res.send('NeuroDoc Backend Running...');
   });
 
-  app.use((err, req, res, next) => {
-  console.error(err.stack);
+  // ─── Global Error Handler ──────────────────────────────────────────────────
 
-  res.status(500).json({
-      error: err.message || 'Internal Server Error'
-    });
+  app.use((err, req, res, next) => {
+    console.error(err.stack);
+    res.status(500).json({ error: err.message || 'Internal Server Error' });
   });
-  
+
+  // ─── MongoDB Connection ────────────────────────────────────────────────────
+  // IMPORTANT: isReady declared here; /api/health above uses it via JS closure
+
+  const MONGODB_URI = process.env.MONGODB_URI;
+
+  if (!MONGODB_URI) {
+    console.error('MONGODB_URI missing in .env');
+    process.exit(1);
+  }
+
+  let isReady = false;
+
+  mongoose.connect(MONGODB_URI)
+    .then(() => {
+      isReady = true;
+      console.log('MongoDB Connected');
+    })
+    .catch(err => {
+      isReady = true; // mark ready so in-memory fallback is usable
+      console.error('MongoDB connection error:', err.message);
+      console.warn('⚠️  Running in in-memory fallback mode');
+    });
+
+  const isProduction = process.env.NODE_ENV === 'production';
+  console.log(`Server environment: ${isProduction ? 'PRODUCTION' : 'DEVELOPMENT'}`);
+
+  // ─── Start Listening ───────────────────────────────────────────────────────
+
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`READY: Server is listening on http://0.0.0.0:${PORT}`);
   });
