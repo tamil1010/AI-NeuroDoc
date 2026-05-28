@@ -8,6 +8,9 @@ import dotenv from 'dotenv';
 import fs from 'fs/promises';
 import { mkdirSync } from 'fs';
 import { createRequire } from 'module';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import rateLimit from 'express-rate-limit';
 
 dotenv.config();
 
@@ -18,9 +21,20 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Multer config for PDF uploads
+// ── Validate ENV ──────────────────────────────────────────────
+if (!process.env.MONGODB_URI) {
+  console.error('MONGODB_URI missing in .env');
+  process.exit(1);
+}
+if (!process.env.JWT_SECRET) {
+  console.error('JWT_SECRET missing in .env');
+  process.exit(1);
+}
+
+// ── Multer Config ─────────────────────────────────────────────
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
 mkdirSync(UPLOADS_DIR, { recursive: true });
+
 const upload = multer({
   storage: multer.diskStorage({
     destination: (req, file, cb) => {
@@ -28,6 +42,7 @@ const upload = multer({
       cb(null, UPLOADS_DIR);
     }
   }),
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB limit
   fileFilter: (req, file, cb) => {
     if (file.mimetype === 'application/pdf') {
       cb(null, true);
@@ -37,10 +52,18 @@ const upload = multer({
   }
 });
 
-async function startServer() {
-  console.log('Starting server initialization...');
+// ── Rate Limiters ─────────────────────────────────────────────
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { error: 'Too many attempts, please try again later' }
+});
 
-  // Ensure uploads directory exists
+async function startServer() {
+  // ✅ FIX: isReady declared at TOP
+  let isReady = false;
+
+  // ── Uploads Dir ───────────────────────────────────────────
   try {
     await fs.mkdir(UPLOADS_DIR, { recursive: true });
     console.log('Uploads directory ensured at:', UPLOADS_DIR);
@@ -48,7 +71,7 @@ async function startServer() {
     console.warn('Error creating uploads directory:', err.message);
   }
 
-  // Request logger middleware
+  // ── Middleware ────────────────────────────────────────────
   app.use((req, res, next) => {
     console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
     next();
@@ -62,7 +85,7 @@ async function startServer() {
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-  // MongoDB Schemas
+  // ── Schemas ───────────────────────────────────────────────
   const UserSchema = new mongoose.Schema({
     email: { type: String, required: true, unique: true },
     password: { type: String, required: true },
@@ -121,22 +144,19 @@ async function startServer() {
   const Document = mongoose.models.Document || mongoose.model('Document', DocumentSchema);
   const PinnedMessage = mongoose.models.PinnedMessage || mongoose.model('PinnedMessage', PinnedMessageSchema);
 
-  // In-memory fallback
+  // ── In-Memory Fallback ────────────────────────────────────
   let inMemoryChats = [];
   let inMemoryDocs = [];
   let inMemoryPins = [];
-
-  // In-memory share storage (ChatGPT-style - no DB)
   const sharedSessions = new Map();
 
-  // Authenticate middleware
+  // ── Auth Middleware ───────────────────────────────────────
   const authenticate = async (req, res, next) => {
     try {
       const token = req.headers.authorization?.split(' ')[1];
       if (!token) return res.status(401).json({ error: 'Auth required' });
 
-      const jwt = (await import('jsonwebtoken')).default;
-      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'neurodoc_secret');
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
       req.userId = decoded.userId;
       next();
     } catch (err) {
@@ -144,13 +164,30 @@ async function startServer() {
     }
   };
 
-  // ─── Auth Endpoints ────────────────────────────────────────────────────────
+  // ── Health Check ──────────────────────────────────────────
+  app.get('/api/health', (req, res) => {
+    if (!isReady) return res.status(503).json({ status: 'starting' });
+    res.json({
+      status: 'ok',
+      db: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
+    });
+  });
 
-  app.post('/api/auth/signup', async (req, res) => {
+  // ── Auth Routes ───────────────────────────────────────────
+  app.post('/api/auth/signup', authLimiter, async (req, res) => {
     try {
       const { email, password, name } = req.body;
-      const bcrypt = (await import('bcryptjs')).default;
-      const jwt = (await import('jsonwebtoken')).default;
+
+      // ✅ FIX: Input validation
+      if (!email || !password || !name) {
+        return res.status(400).json({ error: 'All fields required' });
+      }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return res.status(400).json({ error: 'Invalid email format' });
+      }
+      if (password.length < 6) {
+        return res.status(400).json({ error: 'Password must be at least 6 characters' });
+      }
 
       const existing = await User.findOne({ email });
       if (existing) return res.status(400).json({ error: 'Identity already exists' });
@@ -164,18 +201,35 @@ async function startServer() {
       });
       await user.save();
 
-      const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET || 'neurodoc_secret', { expiresIn: '7d' });
-      res.status(201).json({ token, user: { id: user._id, email: user.email, name: user.name, avatar: user.avatar, preferences: user.preferences } });
+      const token = jwt.sign(
+        { userId: user._id },
+        process.env.JWT_SECRET,
+        { expiresIn: '7d' }
+      );
+
+      res.status(201).json({
+        token,
+        user: {
+          id: user._id,
+          email: user.email,
+          name: user.name,
+          avatar: user.avatar,
+          preferences: user.preferences
+        }
+      });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  app.post('/api/auth/login', async (req, res) => {
+  app.post('/api/auth/login', authLimiter, async (req, res) => {
     try {
       const { email, password } = req.body;
-      const bcrypt = (await import('bcryptjs')).default;
-      const jwt = (await import('jsonwebtoken')).default;
+
+      // ✅ FIX: Input validation
+      if (!email || !password) {
+        return res.status(400).json({ error: 'Email and password required' });
+      }
 
       const user = await User.findOne({ email });
       if (!user) return res.status(400).json({ error: 'Identity not found' });
@@ -183,8 +237,22 @@ async function startServer() {
       const match = await bcrypt.compare(password, user.password);
       if (!match) return res.status(400).json({ error: 'Access denied' });
 
-      const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET || 'neurodoc_secret', { expiresIn: '7d' });
-      res.json({ token, user: { id: user._id, email: user.email, name: user.name, avatar: user.avatar, preferences: user.preferences } });
+      const token = jwt.sign(
+        { userId: user._id },
+        process.env.JWT_SECRET,
+        { expiresIn: '7d' }
+      );
+
+      res.json({
+        token,
+        user: {
+          id: user._id,
+          email: user.email,
+          name: user.name,
+          avatar: user.avatar,
+          preferences: user.preferences
+        }
+      });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -193,6 +261,7 @@ async function startServer() {
   app.post('/api/auth/check-email', async (req, res) => {
     try {
       const { email } = req.body;
+      if (!email) return res.status(400).json({ error: 'Email required' });
       const user = await User.findOne({ email });
       res.json({ registered: !!user });
     } catch (err) {
@@ -200,8 +269,7 @@ async function startServer() {
     }
   });
 
-  // ─── User Endpoints ────────────────────────────────────────────────────────
-
+  // ── User Routes ───────────────────────────────────────────
   app.get('/api/user/me', authenticate, async (req, res) => {
     try {
       const user = await User.findById(req.userId);
@@ -211,7 +279,14 @@ async function startServer() {
       const chatsCount = await Chat.countDocuments({ userId: req.userId });
 
       res.json({
-        user: { id: user._id, email: user.email, name: user.name, avatar: user.avatar, preferences: user.preferences, createdAt: user.createdAt },
+        user: {
+          id: user._id,
+          email: user.email,
+          name: user.name,
+          avatar: user.avatar,
+          preferences: user.preferences,
+          createdAt: user.createdAt
+        },
         stats: { docsCount, chatsCount }
       });
     } catch (err) {
@@ -222,23 +297,16 @@ async function startServer() {
   app.patch('/api/user/preferences', authenticate, async (req, res) => {
     try {
       if (mongoose.connection.readyState !== 1) {
-        console.warn('Database offline during preference update');
-        return res.status(503).json({ error: 'Neuromapping core is temporarily offline (DB_DISCONNECTED)' });
+        return res.status(503).json({ error: 'Database temporarily offline' });
       }
-
       const user = await User.findById(req.userId);
-      if (!user) {
-        console.warn(`User ${req.userId} not found for preference update`);
-        return res.status(404).json({ error: 'Neural identity not found' });
-      }
+      if (!user) return res.status(404).json({ error: 'User not found' });
 
-      console.log(`Updating preferences for user ${user.email}:`, req.body);
       user.preferences = { ...user.preferences.toObject(), ...req.body };
       await user.save();
       res.json(user.preferences);
     } catch (err) {
-      console.error('Preference update system error:', err);
-      res.status(500).json({ error: `SYSTEM_MALFUNCTION: ${err.message}` });
+      res.status(500).json({ error: err.message });
     }
   });
 
@@ -251,7 +319,12 @@ async function startServer() {
       if (name) user.name = name;
       if (avatar) user.avatar = avatar;
       await user.save();
-      res.json({ id: user._id, email: user.email, name: user.name, avatar: user.avatar });
+      res.json({
+        id: user._id,
+        email: user.email,
+        name: user.name,
+        avatar: user.avatar
+      });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -267,15 +340,13 @@ async function startServer() {
       if (mongoose.connection.readyState !== 1) {
         if (type === 'chats' || type === 'all') {
           inMemoryChats = inMemoryChats.filter(c => c.userId !== req.userId);
+          inMemoryPins = inMemoryPins.filter(p => p.userId !== req.userId);
         }
         if (type === 'docs' || type === 'all') {
           inMemoryDocs = inMemoryDocs.filter(d => d.userId !== req.userId);
-          inMemoryChats = inMemoryChats.map(chat => (
+          inMemoryChats = inMemoryChats.map(chat =>
             chat.userId === req.userId ? { ...chat, documents: [] } : chat
-          ));
-        }
-        if (type === 'chats' || type === 'docs' || type === 'all') {
-          inMemoryPins = inMemoryPins.filter(p => p.userId !== req.userId);
+          );
         }
         return res.json({ message: `Successfully cleared ${type} data` });
       }
@@ -295,18 +366,7 @@ async function startServer() {
     }
   });
 
-  // ─── Health Check (uses isReady via closure) ───────────────────────────────
-
-  app.get('/api/health', (req, res) => {
-    if (!isReady) return res.status(503).json({ status: 'starting' });
-    res.json({
-      status: 'ok',
-      db: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
-    });
-  });
-
-  // ─── Pin Endpoints ─────────────────────────────────────────────────────────
-
+  // ── Pin Routes ────────────────────────────────────────────
   app.get('/api/pins', authenticate, async (req, res) => {
     try {
       if (mongoose.connection.readyState === 1) {
@@ -323,11 +383,18 @@ async function startServer() {
     try {
       const { chatId, messageId, content, role, category } = req.body;
       if (mongoose.connection.readyState === 1) {
-        const pin = new PinnedMessage({ userId: req.userId, chatId, messageId, content, role, category });
+        const pin = new PinnedMessage({
+          userId: req.userId, chatId, messageId, content, role, category
+        });
         await pin.save();
         return res.status(201).json(pin);
       }
-      const newPin = { _id: Date.now().toString(), userId: req.userId, chatId, messageId, content, role, category, createdAt: new Date() };
+      const newPin = {
+        _id: Date.now().toString(),
+        userId: req.userId,
+        chatId, messageId, content, role, category,
+        createdAt: new Date()
+      };
       inMemoryPins.push(newPin);
       res.status(201).json(newPin);
     } catch (err) {
@@ -348,11 +415,14 @@ async function startServer() {
     }
   });
 
-  // ─── Export Endpoint ───────────────────────────────────────────────────────
-
+  // ── Export Route ──────────────────────────────────────────
   app.post('/api/export', async (req, res) => {
     try {
       const { format, messages, title } = req.body;
+
+      if (!messages || !Array.isArray(messages)) {
+        return res.status(400).json({ error: 'Messages array required' });
+      }
 
       if (format === 'json') {
         res.setHeader('Content-Type', 'application/json');
@@ -373,11 +443,10 @@ async function startServer() {
 
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition', `attachment; filename="${title || 'chat'}.pdf"`);
-
         doc.pipe(res);
         doc.fontSize(20).text(title || 'NEURODOC Session Export', { align: 'center' });
         doc.moveDown();
-        doc.fontSize(10).text(`Exported on: ${new Date().toLocaleString()}`, { align: 'right' });
+        doc.fontSize(10).text(`Exported: ${new Date().toLocaleString()}`, { align: 'right' });
         doc.moveDown();
 
         messages.forEach(m => {
@@ -390,22 +459,27 @@ async function startServer() {
         return;
       }
 
-      res.status(400).json({ error: 'Invalid format' });
+      res.status(400).json({ error: 'Invalid format. Use json, txt, or pdf' });
     } catch (err) {
       console.error('Export error:', err);
       res.status(500).json({ error: err.message });
     }
   });
 
-  // ─── Chat Endpoints ────────────────────────────────────────────────────────
-
+  // ── Chat Routes ───────────────────────────────────────────
   app.get('/api/chats', authenticate, async (req, res) => {
     try {
       if (mongoose.connection.readyState === 1) {
-        const chats = await Chat.find({ userId: req.userId }).sort({ updatedAt: -1 }).select('title updatedAt createdAt');
+        const chats = await Chat.find({ userId: req.userId })
+          .sort({ updatedAt: -1 })
+          .select('title updatedAt createdAt');
         return res.json(chats);
       }
-      res.json(inMemoryChats.filter(c => c.userId === req.userId).map(c => ({ _id: c._id, title: c.title, updatedAt: c.updatedAt })));
+      res.json(
+        inMemoryChats
+          .filter(c => c.userId === req.userId)
+          .map(c => ({ _id: c._id, title: c.title, updatedAt: c.updatedAt }))
+      );
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -470,7 +544,7 @@ async function startServer() {
   app.get('/api/public-chats/:id', async (req, res) => {
     try {
       const chat = await Chat.findOne({ _id: req.params.id, isPublic: true });
-      if (!chat) return res.status(404).json({ error: 'Shared log not found or access restricted' });
+      if (!chat) return res.status(404).json({ error: 'Shared log not found' });
       res.json(chat);
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -495,8 +569,8 @@ async function startServer() {
   app.post('/api/chats/:id/share-token', authenticate, async (req, res) => {
     try {
       const chatId = req.params.id;
-
       let chat = null;
+
       if (mongoose.connection.readyState === 1) {
         chat = await Chat.findOne({ _id: chatId, userId: req.userId });
       }
@@ -506,21 +580,18 @@ async function startServer() {
       if (!chat) return res.status(404).json({ error: 'Log not found' });
 
       const token = 'share_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-
       sharedSessions.set(token, {
         messages: chat.messages,
         documents: chat.documents || [],
         createdAt: new Date().toISOString()
       });
-
       setTimeout(() => sharedSessions.delete(token), 24 * 60 * 60 * 1000);
 
       res.json({
         shareToken: token,
-        shareUrl: `${process.env.FRONTEND_URL || req.headers.origin || ''}?share=${token}`
+        shareUrl: `${process.env.FRONTEND_URL || ''}?share=${token}`
       });
     } catch (err) {
-      console.error('Share token error:', err);
       res.status(500).json({ error: err.message });
     }
   });
@@ -528,7 +599,7 @@ async function startServer() {
   app.get('/api/shared/:token', async (req, res) => {
     try {
       const session = sharedSessions.get(req.params.token);
-      if (!session) return res.status(404).json({ error: 'Shared session not found or expired' });
+      if (!session) return res.status(404).json({ error: 'Session not found or expired' });
       res.json({ messages: session.messages, documents: session.documents, isShared: true });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -538,20 +609,22 @@ async function startServer() {
   app.post('/api/chats/:id/messages', authenticate, async (req, res) => {
     try {
       const { role, content, confidence } = req.body;
+      if (!role || !content) {
+        return res.status(400).json({ error: 'Role and content required' });
+      }
+
       if (mongoose.connection.readyState === 1) {
         const chat = await Chat.findOne({ _id: req.params.id, userId: req.userId });
         if (!chat) return res.status(404).json({ error: 'Log not found' });
-
         chat.messages.push({ role, content, confidence });
         chat.updatedAt = new Date();
-
         if (chat.title === 'INITIATED_LOG' && role === 'user') {
           chat.title = content.substring(0, 30).toUpperCase();
         }
-
         await chat.save();
         return res.json(chat);
       }
+
       const chat = inMemoryChats.find(c => c._id === req.params.id && c.userId === req.userId);
       if (!chat) return res.status(404).json({ error: 'Log not found' });
       chat.messages.push({ role, content, confidence, timestamp: new Date() });
@@ -565,15 +638,19 @@ async function startServer() {
   app.post('/api/chats/:id/documents', authenticate, async (req, res) => {
     try {
       const { name, pageCount, content, chunks } = req.body;
-      if (!name) return res.status(400).json({ error: 'Document name is required' });
+      if (!name) return res.status(400).json({ error: 'Document name required' });
 
       const contentText = typeof content === 'string' ? content : '';
       const chunkList = Array.isArray(chunks) ? chunks : [];
       const maxContentLength = 10 * 1024 * 1024;
-      const savedContent = contentText.length > maxContentLength ? contentText.slice(0, maxContentLength) : contentText;
+      const savedContent = contentText.length > maxContentLength
+        ? contentText.slice(0, maxContentLength)
+        : contentText;
 
-      const documentPayload = { userId: req.userId, chatId: req.params.id, name, pageCount, content: savedContent, chunks: chunkList };
-      const chatDocumentMetadata = { userId: req.userId, chatId: req.params.id, name, pageCount };
+      const documentPayload = {
+        userId: req.userId, chatId: req.params.id,
+        name, pageCount, content: savedContent, chunks: chunkList
+      };
 
       if (mongoose.connection.readyState === 1) {
         const chat = await Chat.findOne({ _id: req.params.id, userId: req.userId });
@@ -581,11 +658,9 @@ async function startServer() {
 
         const document = new Document(documentPayload);
         await document.save();
-
-        chat.documents.push(chatDocumentMetadata);
+        chat.documents.push({ userId: req.userId, chatId: req.params.id, name, pageCount });
         chat.updatedAt = new Date();
         await chat.save();
-
         return res.status(201).json(document);
       }
 
@@ -593,7 +668,7 @@ async function startServer() {
       if (!chat) return res.status(404).json({ error: 'Log not found' });
       const document = { _id: Date.now().toString(), ...documentPayload, uploadDate: new Date() };
       inMemoryDocs.push(document);
-      chat.documents.push(chatDocumentMetadata);
+      chat.documents.push({ userId: req.userId, chatId: req.params.id, name, pageCount });
       chat.updatedAt = new Date();
       res.status(201).json(document);
     } catch (err) {
@@ -618,18 +693,15 @@ async function startServer() {
     }
   });
 
-  // ─── PDF Extraction ────────────────────────────────────────────────────────
-
+  // ── PDF Extraction ────────────────────────────────────────
   app.post('/api/extract-text', upload.single('pdf'), async (req, res) => {
     try {
       if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
-      console.log('Processing file:', req.file.originalname, 'Size:', req.file.size);
+      console.log('Processing:', req.file.originalname, 'Size:', req.file.size);
       const dataBuffer = await fs.readFile(req.file.path);
 
-      let text = '';
-      let numpages = 0;
-      let info = {};
+      let text = '', numpages = 0, info = {};
 
       try {
         let pdfMod;
@@ -641,7 +713,6 @@ async function startServer() {
         }
 
         if (pdfMod && pdfMod.PDFParse) {
-          console.log('Using pdf-parse v2+ API');
           const parser = new pdfMod.PDFParse({ data: dataBuffer });
           try {
             const textResult = await parser.getText();
@@ -653,15 +724,16 @@ async function startServer() {
             if (parser.destroy) await parser.destroy().catch(() => {});
           }
         } else {
-          console.log('Using pdf-parse functional API');
           const pdfExtract = pdfMod.default || pdfMod;
-          const data = await (typeof pdfExtract === 'function' ? pdfExtract(dataBuffer) : pdfExtract.pdf(dataBuffer));
+          const data = await (typeof pdfExtract === 'function'
+            ? pdfExtract(dataBuffer)
+            : pdfExtract.pdf(dataBuffer));
           text = data.text || '';
           numpages = data.numpages || 0;
           info = data.info || {};
         }
       } catch (e) {
-        console.warn('Primary parser failed, trying pdf-extraction:', e.message);
+        console.warn('Primary parser failed:', e.message);
         try {
           const pdfExtractMod = await import('pdf-extraction');
           const pdfExtract = pdfExtractMod.default || pdfExtractMod;
@@ -670,64 +742,54 @@ async function startServer() {
           numpages = data.numpages;
           info = data.info;
         } catch (e2) {
-          console.error('All PDF extraction attempts failed:', e2);
-          throw new Error('Failed to parse PDF document with available libraries.');
+          throw new Error('Failed to parse PDF with all available libraries');
         }
       }
 
-      console.log('Extraction complete. Pages:', numpages);
-      await fs.unlink(req.file.path).catch(err => console.error('Cleanup error:', err));
-
       res.json({ text, info, numpages, filename: req.file.originalname });
     } catch (error) {
-      console.error('API Error:', error);
-      res.status(500).json({ error: error.message || 'Internal server error' });
+      console.error('PDF extraction error:', error);
+      res.status(500).json({ error: error.message });
+    } finally {
+      // ✅ FIX: Always cleanup uploaded file
+      if (req.file?.path) {
+        await fs.unlink(req.file.path).catch(err =>
+          console.error('File cleanup error:', err)
+        );
+      }
     }
   });
 
-  // ─── Root Route ────────────────────────────────────────────────────────────
-
+  // ── Root ──────────────────────────────────────────────────
   app.get('/', (req, res) => {
     res.send('NeuroDoc Backend Running...');
   });
 
-  // ─── Global Error Handler ──────────────────────────────────────────────────
-
+  // ── Global Error Handler ──────────────────────────────────
   app.use((err, req, res, next) => {
     console.error(err.stack);
     res.status(500).json({ error: err.message || 'Internal Server Error' });
   });
 
-  // ─── MongoDB Connection ────────────────────────────────────────────────────
-  // IMPORTANT: isReady declared here; /api/health above uses it via JS closure
-
-  const MONGODB_URI = process.env.MONGODB_URI;
-
-  if (!MONGODB_URI) {
-    console.error('MONGODB_URI missing in .env');
-    process.exit(1);
-  }
-
-  let isReady = false;
-
-  mongoose.connect(MONGODB_URI)
+  // ── MongoDB Connection ────────────────────────────────────
+  mongoose.connect(process.env.MONGODB_URI, {
+    serverSelectionTimeoutMS: 5000,  // ✅ FIX: Added timeouts
+    connectTimeoutMS: 10000,
+    socketTimeoutMS: 45000,
+  })
     .then(() => {
       isReady = true;
-      console.log('MongoDB Connected');
+      console.log('✅ MongoDB Connected');
     })
     .catch(err => {
-      isReady = true; // mark ready so in-memory fallback is usable
-      console.error('MongoDB connection error:', err.message);
+      isReady = true;
+      console.error('❌ MongoDB error:', err.message);
       console.warn('⚠️  Running in in-memory fallback mode');
     });
 
-  const isProduction = process.env.NODE_ENV === 'production';
-  console.log(`Server environment: ${isProduction ? 'PRODUCTION' : 'DEVELOPMENT'}`);
-
-  // ─── Start Listening ───────────────────────────────────────────────────────
-
+  // ── Start Server ──────────────────────────────────────────
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`READY: Server is listening on http://0.0.0.0:${PORT}`);
+    console.log(`✅ Server running on http://0.0.0.0:${PORT}`);
   });
 }
 
