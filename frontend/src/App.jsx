@@ -1550,7 +1550,7 @@ const handleShare = async () => {
                       type="text"
                       value={authForm.name}
                       onChange={e => setAuthForm({...authForm, name: e.target.value})}
-                      placeholder="e.g., John Doe"
+                      placeholder="Name"
                       className="w-full bg-white/5 border border-white/10 p-4 pl-12 rounded-2xl text-sm text-white outline-none focus:border-ai-purple/50 transition-all font-medium placeholder:text-gray-700"
                     />
                   </div>
@@ -1565,7 +1565,7 @@ const handleShare = async () => {
                     type="email"
                     value={authForm.email}
                     onChange={e => setAuthForm({...authForm, email: e.target.value})}
-                    placeholder="user@example.com"
+                    placeholder="user@gmail.com"
                     className="w-full bg-white/5 border border-white/10 p-4 pl-12 rounded-2xl text-sm text-white outline-none focus:border-ai-purple/50 transition-all font-medium placeholder:text-gray-700"
                   />
                 </div>

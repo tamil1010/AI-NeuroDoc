@@ -78,11 +78,27 @@ async function startServer() {
   });
 
   app.use(cors({
-    origin: [
-      'http://localhost:5173',
-      'https://ai-neuro-81izjvm95-tamilvani-s-projects.vercel.app',
-      process.env.FRONTEND_URL
-    ].filter(Boolean),
+    origin: function(origin, callback) {
+      // Allow requests with no origin (mobile apps, curl, etc.)
+      if (!origin) return callback(null, true);
+      
+      const allowedOrigins = [
+        'http://localhost:5173',
+        'https://ai-neuro-81izjvm95-tamilvani-s-projects.vercel.app',
+        'https://ai-neuro-134bb0noi-tamilvani-s-projects.vercel.app',
+        process.env.FRONTEND_URL
+      ].filter(Boolean);
+
+      // Allow any vercel.app subdomain from your project
+      if (
+        allowedOrigins.includes(origin) ||
+        /^https:\/\/ai-neuro-.*-tamilvani-s-projects\.vercel\.app$/.test(origin)
+      ) {
+        callback(null, true);
+      } else {
+        callback(new Error('Not allowed by CORS'));
+      }
+    },
     credentials: true
   }));
 
