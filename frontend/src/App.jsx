@@ -242,6 +242,8 @@ export default function App() {
   });
   const [isConfirmingLogout, setIsConfirmingLogout] = useState(false);
   const [chatPendingDelete, setChatPendingDelete] = useState(null);
+  const [forgotForm, setForgotForm] = useState({ email: '', newPassword: '', confirmPassword: '' });
+  const [forgotError, setForgotError] = useState('');
 
   const scrollRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -1439,6 +1441,46 @@ const handleShare = async () => {
     setIsConfirmingLogout(false);
   };
 
+  const handleForgotPassword = async (e) => {
+    e.preventDefault();
+    setForgotError('');
+
+    if (!forgotForm.email || !forgotForm.newPassword || !forgotForm.confirmPassword) {
+      setForgotError('All fields are required');
+      return;
+    }
+    if (forgotForm.newPassword !== forgotForm.confirmPassword) {
+      setForgotError('Passwords do not match');
+      return;
+    }
+    if (forgotForm.newPassword.length < 6) {
+      setForgotError('Password must be at least 6 characters');
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/reset-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: forgotForm.email,
+          newPassword: forgotForm.newPassword
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setForgotError(data.error || 'Reset failed');
+        return;
+      }
+      setForgotForm({ email: '', newPassword: '', confirmPassword: '' });
+      setAuthMode('login');
+    } catch (err) {
+      setForgotError('Connection failed. Try again.');
+    }
+  };
+
+  
+
   const handleAuth = async (e) => {
     e.preventDefault();
     setAuthError('');
@@ -1540,6 +1582,54 @@ const handleShare = async () => {
               <div className="h-px w-20 bg-gradient-to-r from-transparent via-ai-purple/50 to-transparent" />
             </div>
 
+            {/* FORGOT PASSWORD FORM */}
+            {authMode === 'forgot' && (
+              <form onSubmit={handleForgotPassword} className="space-y-6">
+                <div className="space-y-1.5">
+                  <label className="text-[9px] font-bold text-gray-500 uppercase tracking-[1px] ml-1">Email Address</label>
+                  <div className="relative group">
+                    <Fingerprint className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-600" size={16} />
+                    <input type="email" value={forgotForm.email}
+                      onChange={e => setForgotForm({...forgotForm, email: e.target.value})}
+                      placeholder="user@gmail.com"
+                      className="w-full bg-white/5 border border-white/10 p-4 pl-12 rounded-2xl text-sm text-white outline-none focus:border-ai-purple/50 transition-all" />
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-[9px] font-bold text-gray-500 uppercase tracking-[1px] ml-1">New Password</label>
+                  <div className="relative group">
+                    <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-600" size={16} />
+                    <input type="password" value={forgotForm.newPassword}
+                      onChange={e => setForgotForm({...forgotForm, newPassword: e.target.value})}
+                      placeholder="••••••••••••"
+                      className="w-full bg-white/5 border border-white/10 p-4 pl-12 rounded-2xl text-sm text-white outline-none focus:border-ai-purple/50 transition-all" />
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-[9px] font-bold text-gray-500 uppercase tracking-[1px] ml-1">Confirm Password</label>
+                  <div className="relative group">
+                    <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-600" size={16} />
+                    <input type="password" value={forgotForm.confirmPassword}
+                      onChange={e => setForgotForm({...forgotForm, confirmPassword: e.target.value})}
+                      placeholder="••••••••••••"
+                      className="w-full bg-white/5 border border-white/10 p-4 pl-12 rounded-2xl text-sm text-white outline-none focus:border-ai-purple/50 transition-all" />
+                  </div>
+                </div>
+                {forgotError && (
+                  <motion.div initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }}
+                    className="bg-red-500/10 border border-red-500/20 p-3 rounded-xl flex items-center gap-2">
+                    <AlertCircle size={14} className="text-red-500 flex-shrink-0" />
+                    <p className="text-[10px] font-bold text-red-500 uppercase tracking-[1px]">{forgotError}</p>
+                  </motion.div>
+                )}
+                <button type="submit"
+                  className="w-full font-black py-4 rounded-2xl bg-ai-purple hover:bg-ai-purple/80 text-white transition-all uppercase tracking-[3px] text-xs flex items-center justify-center gap-2 group">
+                  RESET_PASSWORD <ArrowRight size={16} className="group-hover:translate-x-1 transition-transform" />
+                </button>
+              </form>
+            )}
+
+            {authMode !== 'forgot' && (
             <form onSubmit={handleAuth} className="space-y-6">
               {authMode === 'signup' && (
                 <div className="space-y-1.5">
@@ -1585,6 +1675,16 @@ const handleShare = async () => {
                 </div>
               </div>
 
+              {authMode === 'login' && (
+                <div className="text-right">
+                  <button type="button"
+                    onClick={() => { setAuthMode('forgot'); setAuthError(''); }}
+                    className="text-[9px] font-bold text-ai-purple hover:text-ai-blue transition-colors uppercase tracking-[1px]">
+                    FORGOT_PASSWORD?
+                  </button>
+                </div>
+              )}
+
               {authError && (
                 <motion.div 
                   initial={{ opacity: 0, x: -10 }}
@@ -1610,14 +1710,17 @@ const handleShare = async () => {
               </button>
             </form>
 
+           
+            )}
+
             <div className="mt-8 text-center pt-8 border-t border-white/5">
               <p className="text-[10px] font-bold text-gray-600 uppercase tracking-[1px]">
-                {authMode === 'login' ? "New user?" : "Already have an account?"}
+                {authMode === 'forgot' ? "Back to login?" : authMode === 'login' ? "New user?" : "Already have an account?"}
                 <button 
-                  onClick={() => { setAuthMode(authMode === 'login' ? 'signup' : 'login'); setAuthError(''); }}
+                  onClick={() => { setAuthMode(authMode === 'forgot' ? 'login' : authMode === 'login' ? 'signup' : 'login'); setAuthError(''); setForgotError(''); }}
                   className="ml-2 text-ai-purple hover:text-ai-blue transition-colors outline-none font-black"
                 >
-                  {authMode === 'login' ? "SIGN_UP" : "LOGIN"}
+                  {authMode === 'forgot' ? "LOGIN" : authMode === 'login' ? "SIGN_UP" : "LOGIN"}
                 </button>
               </p>
             </div>
