@@ -1458,8 +1458,10 @@ const handleShare = async () => {
     }
 
     try {
-      const endpoint = authMode === 'login' ? '/api/auth/login' : '/api/auth/signup';
-      const res = await fetch(endpoint, {
+      const endpoint = authMode === 'login' 
+      ? `${import.meta.env.VITE_API_URL}/api/auth/login` 
+      : `${import.meta.env.VITE_API_URL}/api/auth/signup`;
+    const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(authForm)
@@ -1491,7 +1493,7 @@ const handleShare = async () => {
 
       setIsCheckingEmail(true);
       try {
-        const res = await fetch('https://ai-neurodoc.onrender.com/api/auth/check-email', {
+        const res = await fetch(`${import.meta.env.VITE_API_URL}/api/auth/check-email`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email: authForm.email })

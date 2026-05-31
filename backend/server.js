@@ -78,7 +78,11 @@ async function startServer() {
   });
 
   app.use(cors({
-    origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+    origin: [
+      'http://localhost:5173',
+      'https://ai-neuro-81izjvm95-tamilvani-s-projects.vercel.app',
+      process.env.FRONTEND_URL
+    ].filter(Boolean),
     credentials: true
   }));
 
