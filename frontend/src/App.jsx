@@ -1,3 +1,4 @@
+const API_BASE = import.meta.env.VITE_API_URL || 'https://ai-neurodoc.onrender.com';
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { GoogleGenAI } from "@google/genai";
 import * as d3 from 'd3';
@@ -1458,9 +1459,10 @@ const handleShare = async () => {
     }
 
     try {
+      const BASE_URL = import.meta.env.VITE_API_URL || 'https://ai-neurodoc.onrender.com';
       const endpoint = authMode === 'login' 
-      ? `${import.meta.env.VITE_API_URL}/api/auth/login` 
-      : `${import.meta.env.VITE_API_URL}/api/auth/signup`;
+        ? `${BASE_URL}/api/auth/login` 
+        : `${BASE_URL}/api/auth/signup`;
     const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1493,7 +1495,8 @@ const handleShare = async () => {
 
       setIsCheckingEmail(true);
       try {
-        const res = await fetch(`${import.meta.env.VITE_API_URL}/api/auth/check-email`, {
+        const BASE_URL = import.meta.env.VITE_API_URL || 'https://ai-neurodoc.onrender.com';
+        const res = await fetch(`${BASE_URL}/api/auth/check-email`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email: authForm.email })
